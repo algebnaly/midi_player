@@ -120,6 +120,19 @@ impl MidiData {
         })
     }
 
+    pub fn get_bpm(&self) -> f64 {
+        if let Some(tempo) = self.tempo_map.first() {
+            60_000_000.0 / tempo.1 as f64
+        } else {
+            120.0
+        }
+    }
+
+    pub fn set_bpm(&mut self, bpm: f64) {
+        let tempo = (60_000_000.0 / bpm.max(1.0)) as u32;
+        self.tempo_map = vec![(0, tempo)];
+    }
+
     pub fn to_smf(&self) -> Smf<'static> {
         let header = Header {
             format: Format::Parallel,

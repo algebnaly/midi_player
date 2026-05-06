@@ -30,9 +30,17 @@ pub fn build_ui(app: &gtk::Application) {
     let track_list = StringList::new(&[]);
     let track_dropdown = DropDown::new(Some(track_list.clone()), gtk::Expression::NONE);
 
+    let bpm_adj = gtk::Adjustment::new(120.0, 20.0, 300.0, 1.0, 10.0, 0.0);
+    let bpm_spin = gtk::SpinButton::new(Some(&bpm_adj), 1.0, 0);
+    bpm_spin.set_tooltip_text(Some("BPM"));
+    let bpm_box = Box::new(gtk::Orientation::Horizontal, 5);
+    bpm_box.append(&gtk::Label::new(Some("BPM: ")));
+    bpm_box.append(&bpm_spin);
+
     header_bar.pack_start(&open_btn);
     header_bar.pack_start(&save_btn);
     header_bar.pack_start(&track_dropdown);
+    header_bar.pack_start(&bpm_box);
 
     header_bar.pack_end(&rewind_btn);
     header_bar.pack_end(&pause_btn);
@@ -68,6 +76,7 @@ pub fn build_ui(app: &gtk::Application) {
     let current_midi_clone = current_midi_path.clone();
     let piano_roll_clone = piano_roll.clone();
     let track_list_clone = track_list.clone();
+    let bpm_spin_open = bpm_spin.clone();
 
     open_btn.connect_clicked(move |_| {
         let dialog = gtk::FileDialog::new();
@@ -75,6 +84,7 @@ pub fn build_ui(app: &gtk::Application) {
         let midi_path = current_midi_clone.clone();
         let pr = piano_roll_clone.clone();
         let tl = track_list_clone.clone();
+        let bpm_spin_inner = bpm_spin_open.clone();
 
         dialog.open(Some(&window), None::<&gtk::gio::Cancellable>, move |res| {
             if let Ok(file) = res {
@@ -93,6 +103,8 @@ pub fn build_ui(app: &gtk::Application) {
                             };
                             tl.append(&name);
                         }
+                        let bpm = data.get_bpm();
+                        bpm_spin_inner.set_value(bpm);
                         pr.set_data(data);
                         pr.set_playhead(0.0);
                     }
@@ -100,6 +112,32 @@ pub fn build_ui(app: &gtk::Application) {
                 }
             }
         });
+    });
+
+    let pr_bpm = piano_roll.clone();
+    let player_bpm = player.clone();
+    let is_playing_bpm = is_playing.clone();
+    bpm_spin.connect_value_changed(move |spin| {
+        let new_bpm = spin.value();
+        if let Some(mut midi) = pr_bpm.get_data_clone() {
+            if (midi.get_bpm() - new_bpm).abs() < 0.1 {
+                return;
+            }
+            let current_tick = pr_bpm.get_playhead_tick();
+            midi.set_bpm(new_bpm);
+            pr_bpm.update_data(midi.clone());
+            pr_bpm.set_playhead_tick(current_tick);
+
+            if *is_playing_bpm.borrow() {
+                if let Some(p) = &*player_bpm.borrow() {
+                    let buf = midi.to_buffer();
+                    let new_time = current_tick / (midi.ticks_per_beat as f64 * (new_bpm / 60.0));
+                    if let Err(e) = p.hot_swap(&buf, new_time) {
+                        eprintln!("Failed to hot-swap on BPM change: {}", e);
+                    }
+                }
+            }
+        }
     });
 
     let pr_save = piano_roll.clone();
