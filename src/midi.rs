@@ -1,0 +1,235 @@
+use anyhow::Result;
+use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind};
+use std::fs;
+
+#[derive(Debug, Clone)]
+pub struct Note {
+    pub pitch: u8,
+    pub velocity: u8,
+    pub start_tick: u64,
+    pub end_tick: u64,
+    pub channel: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackData {
+    pub name: String,
+    pub notes: Vec<Note>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MidiData {
+    pub tracks: Vec<TrackData>,
+    pub ticks_per_beat: u16,
+    pub tempo_map: Vec<(u64, u32)>,
+}
+
+impl MidiData {
+    pub fn load(path: &str) -> Result<Self> {
+        let data = fs::read(path)?;
+        let smf = Smf::parse(&data)?;
+
+        let ticks_per_beat = match smf.header.timing {
+            Timing::Metrical(ticks) => ticks.as_int(),
+            Timing::Timecode(_, _) => 480,
+        };
+
+        let mut tracks = Vec::new();
+        let mut tempo_map = vec![(0, 500_000)];
+
+        for (i, track) in smf.tracks.iter().enumerate() {
+            let mut current_tick = 0;
+            let mut active_notes: std::collections::HashMap<(u8, u8), (u64, u8)> =
+                std::collections::HashMap::new();
+            let mut notes = Vec::new();
+            let mut name = format!("Track {}", i);
+
+            for event in track {
+                current_tick += event.delta.as_int() as u64;
+
+                match event.kind {
+                    TrackEventKind::Midi { channel, message } => {
+                        let ch = channel.as_int();
+                        match message {
+                            MidiMessage::NoteOn { key, vel } => {
+                                let p = key.as_int();
+                                let v = vel.as_int();
+                                if v > 0 {
+                                    active_notes.insert((ch, p), (current_tick, v));
+                                } else {
+                                    if let Some((start, orig_vel)) = active_notes.remove(&(ch, p)) {
+                                        notes.push(Note {
+                                            pitch: p,
+                                            velocity: orig_vel,
+                                            start_tick: start,
+                                            end_tick: current_tick,
+                                            channel: ch,
+                                        });
+                                    }
+                                }
+                            }
+                            MidiMessage::NoteOff { key, vel: _ } => {
+                                let p = key.as_int();
+                                if let Some((start, orig_vel)) = active_notes.remove(&(ch, p)) {
+                                    notes.push(Note {
+                                        pitch: p,
+                                        velocity: orig_vel,
+                                        start_tick: start,
+                                        end_tick: current_tick,
+                                        channel: ch,
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    TrackEventKind::Meta(meta) => match meta {
+                        MetaMessage::Tempo(tempo) => {
+                            tempo_map.push((current_tick, tempo.as_int()));
+                        }
+                        MetaMessage::TrackName(n) => {
+                            name = String::from_utf8_lossy(n).into_owned();
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+
+            notes.sort_by_key(|n| n.start_tick);
+            tracks.push(TrackData { name, notes });
+        }
+
+        tempo_map.sort_by_key(|t| t.0);
+
+        Ok(MidiData {
+            tracks,
+            ticks_per_beat,
+            tempo_map,
+        })
+    }
+
+    pub fn to_smf(&self) -> Smf<'static> {
+        let header = Header {
+            format: Format::Parallel,
+            timing: Timing::Metrical(midly::num::u15::new(self.ticks_per_beat)),
+        };
+
+        let mut smf_tracks = Vec::new();
+
+        // Track 0: Tempo map
+        let mut track0 = Vec::new();
+        let mut last_tick = 0;
+        for (tick, tempo) in &self.tempo_map {
+            let delta = *tick - last_tick;
+            track0.push(TrackEvent {
+                delta: midly::num::u28::new(delta as u32),
+                kind: TrackEventKind::Meta(MetaMessage::Tempo(midly::num::u24::new(*tempo))),
+            });
+            last_tick = *tick;
+        }
+        track0.push(TrackEvent {
+            delta: midly::num::u28::new(0),
+            kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+        });
+        smf_tracks.push(track0);
+
+        // Other tracks
+        for t in &self.tracks {
+            let mut events = Vec::new();
+
+            // Create absolute note on/off events
+            #[derive(Debug, Clone)]
+            enum Ev {
+                On(u8, u8, u8),
+                Off(u8, u8, u8),
+            } // ch, pitch, vel
+
+            let mut abs_events: Vec<(u64, Ev)> = Vec::new();
+            for n in &t.notes {
+                abs_events.push((n.start_tick, Ev::On(n.channel, n.pitch, n.velocity)));
+                abs_events.push((n.end_tick, Ev::Off(n.channel, n.pitch, 0)));
+            }
+
+            // Sort by tick, then NoteOff before NoteOn
+            abs_events.sort_by(|a, b| {
+                if a.0 != b.0 {
+                    a.0.cmp(&b.0)
+                } else {
+                    match (&a.1, &b.1) {
+                        (Ev::Off(_, _, _), Ev::On(_, _, _)) => std::cmp::Ordering::Less,
+                        (Ev::On(_, _, _), Ev::Off(_, _, _)) => std::cmp::Ordering::Greater,
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                }
+            });
+
+            let mut last_ev_tick = 0;
+            for (tick, ev) in abs_events {
+                let delta = tick - last_ev_tick;
+                let kind = match ev {
+                    Ev::On(ch, p, v) => TrackEventKind::Midi {
+                        channel: midly::num::u4::new(ch),
+                        message: MidiMessage::NoteOn {
+                            key: midly::num::u7::new(p),
+                            vel: midly::num::u7::new(v),
+                        },
+                    },
+                    Ev::Off(ch, p, v) => TrackEventKind::Midi {
+                        channel: midly::num::u4::new(ch),
+                        message: MidiMessage::NoteOff {
+                            key: midly::num::u7::new(p),
+                            vel: midly::num::u7::new(v),
+                        },
+                    },
+                };
+
+                // midly limits delta to u28. Loop to insert dummy events if delta is too large
+                let mut remaining_delta = delta;
+                while remaining_delta > 0x0FFFFFFF {
+                    events.push(TrackEvent {
+                        delta: midly::num::u28::new(0x0FFFFFFF),
+                        // SysEx as dummy padding if needed, or just a controller
+                        kind: TrackEventKind::Midi {
+                            channel: midly::num::u4::new(0),
+                            message: MidiMessage::Controller {
+                                controller: midly::num::u7::new(0),
+                                value: midly::num::u7::new(0),
+                            },
+                        },
+                    });
+                    remaining_delta -= 0x0FFFFFFF;
+                }
+
+                events.push(TrackEvent {
+                    delta: midly::num::u28::new(remaining_delta as u32),
+                    kind,
+                });
+                last_ev_tick = tick;
+            }
+
+            events.push(TrackEvent {
+                delta: midly::num::u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
+            });
+
+            smf_tracks.push(events);
+        }
+
+        Smf {
+            header,
+            tracks: smf_tracks,
+        }
+    }
+
+    pub fn to_buffer(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        self.to_smf().write(&mut buf).unwrap();
+        buf
+    }
+
+    pub fn export_to_file(&self, path: &str) -> Result<()> {
+        fs::write(path, self.to_buffer())?;
+        Ok(())
+    }
+}
