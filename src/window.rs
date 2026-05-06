@@ -24,7 +24,8 @@ pub fn build_ui(app: &gtk::Application) {
     let open_btn = Button::with_label("Open");
     let save_btn = Button::with_label("Export");
     let play_btn = Button::with_label("Play");
-    let stop_btn = Button::with_label("Stop");
+    let pause_btn = Button::with_label("Pause");
+    let rewind_btn = Button::with_label("Start Over");
 
     let track_list = StringList::new(&[]);
     let track_dropdown = DropDown::new(Some(track_list.clone()), gtk::Expression::NONE);
@@ -33,14 +34,15 @@ pub fn build_ui(app: &gtk::Application) {
     header_bar.pack_start(&save_btn);
     header_bar.pack_start(&track_dropdown);
 
-    header_bar.pack_end(&stop_btn);
+    header_bar.pack_end(&rewind_btn);
+    header_bar.pack_end(&pause_btn);
     header_bar.pack_end(&play_btn);
 
     let vbox = Box::new(gtk::Orientation::Vertical, 0);
     window.set_child(Some(&vbox));
 
-    let piano_roll = Rc::new(PianoRollWidget::new());
-    vbox.append(&piano_roll.widget);
+    let piano_roll = PianoRollWidget::new();
+    vbox.append(&piano_roll);
 
     let player = Rc::new(RefCell::new(match Player::new("default.sf2") {
         Ok(p) => Some(p),
@@ -55,6 +57,11 @@ pub fn build_ui(app: &gtk::Application) {
 
     let current_midi_path = Rc::new(RefCell::new(None::<String>));
     let is_playing = Rc::new(RefCell::new(false));
+
+    // Initialize with an empty project
+    let empty_data = MidiData::new_empty();
+    track_list.append("Track 0");
+    piano_roll.set_data(empty_data);
 
     // Open action
     let window_clone = window.clone();
@@ -121,22 +128,41 @@ pub fn build_ui(app: &gtk::Application) {
     play_btn.connect_clicked(move |_| {
         if let Some(midi) = pr_play.get_data_clone() {
             if let Some(p) = &*player_clone.borrow() {
-                let buf = midi.to_buffer();
-                if let Err(e) = p.play_buffer(&buf) {
-                    eprintln!("Failed to play: {}", e);
-                } else {
-                    *is_playing_clone.borrow_mut() = true;
+                if p.is_paused() {
+                    p.resume();
+                } else if !p.is_playing() {
+                    let buf = midi.to_buffer();
+                    if let Err(e) = p.play_buffer(&buf) {
+                        eprintln!("Failed to play: {}", e);
+                    }
                 }
+                *is_playing_clone.borrow_mut() = true;
             }
         }
     });
 
     let player_clone_stop = player.clone();
     let is_playing_stop = is_playing.clone();
-    stop_btn.connect_clicked(move |_| {
+    pause_btn.connect_clicked(move |_| {
         if let Some(p) = &*player_clone_stop.borrow() {
-            p.stop();
+            p.pause();
             *is_playing_stop.borrow_mut() = false;
+        }
+    });
+
+    let player_clone_rewind = player.clone();
+    let is_playing_rewind = is_playing.clone();
+    let pr_rewind = piano_roll.clone();
+    rewind_btn.connect_clicked(move |_| {
+        if let Some(midi) = pr_rewind.get_data_clone() {
+            if let Some(p) = &*player_clone_rewind.borrow() {
+                let buf = midi.to_buffer();
+                if let Err(e) = p.play_buffer(&buf) {
+                    eprintln!("Failed to play: {}", e);
+                } else {
+                    *is_playing_rewind.borrow_mut() = true;
+                }
+            }
         }
     });
 
@@ -155,21 +181,20 @@ pub fn build_ui(app: &gtk::Application) {
     key_ctrl.connect_key_pressed(move |_, keyval, _, _| {
         if keyval == gtk::gdk::Key::space {
             let mut playing = is_playing_key.borrow_mut();
-            if *playing {
-                if let Some(p) = &*player_key.borrow() {
-                    p.stop();
-                }
-                *playing = false;
-            } else {
-                if let Some(midi) = pr_key.get_data_clone() {
-                    if let Some(p) = &*player_key.borrow() {
+            if let Some(p) = &*player_key.borrow() {
+                if p.is_playing() && !p.is_paused() {
+                    p.pause();
+                    *playing = false;
+                } else {
+                    if p.is_paused() {
+                        p.resume();
+                    } else if let Some(midi) = pr_key.get_data_clone() {
                         let buf = midi.to_buffer();
                         if let Err(e) = p.play_buffer(&buf) {
                             eprintln!("Failed to play: {}", e);
-                        } else {
-                            *playing = true;
                         }
                     }
+                    *playing = true;
                 }
             }
             return glib::Propagation::Stop;
@@ -195,6 +220,45 @@ pub fn build_ui(app: &gtk::Application) {
             }
         }
         glib::ControlFlow::Continue
+    });
+
+    // Provide player to piano roll for seek callback
+    let player_seek = player.clone();
+    piano_roll.connect_seek(move |time| {
+        if let Some(p) = &*player_seek.borrow() {
+            p.seek(time);
+        }
+    });
+
+    let player_data_changed = player.clone();
+    let pr_data_changed = piano_roll.clone();
+    let is_playing_changed = is_playing.clone();
+    piano_roll.connect_data_changed(move || {
+        if *is_playing_changed.borrow() {
+            if let Some(p) = &*player_data_changed.borrow() {
+                if let Some(midi) = pr_data_changed.get_data_clone() {
+                    let current_time = p.get_time();
+                    let buf = midi.to_buffer();
+                    if let Err(e) = p.hot_swap(&buf, current_time) {
+                        eprintln!("Failed to play during hot-swap: {}", e);
+                    }
+                }
+            }
+        }
+    });
+
+    let player_preview_on = player.clone();
+    piano_roll.connect_preview_note_on(move |pitch, vel| {
+        if let Some(p) = &*player_preview_on.borrow() {
+            p.preview_note_on(pitch, vel);
+        }
+    });
+
+    let player_preview_off = player.clone();
+    piano_roll.connect_preview_note_off(move |pitch| {
+        if let Some(p) = &*player_preview_off.borrow() {
+            p.preview_note_off(pitch);
+        }
     });
 
     window.present();

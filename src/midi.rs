@@ -25,6 +25,17 @@ pub struct MidiData {
 }
 
 impl MidiData {
+    pub fn new_empty() -> Self {
+        MidiData {
+            tracks: vec![TrackData {
+                name: "Track 0".to_string(),
+                notes: Vec::new(),
+            }],
+            ticks_per_beat: 480,
+            tempo_map: vec![(0, 500_000)],
+        }
+    }
+
     pub fn load(path: &str) -> Result<Self> {
         let data = fs::read(path)?;
         let smf = Smf::parse(&data)?;
