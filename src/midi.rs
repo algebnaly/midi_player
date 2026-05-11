@@ -1,3 +1,20 @@
+//! MIDI data model, file I/O, and event compilation.
+//!
+//! This module defines the core data structures for representing MIDI music:
+//!
+//! * [`Note`] – a single note with pitch, velocity, timing, and channel.
+//! * [`TrackData`] – a named collection of notes (one per track).
+//! * [`MidiData`] – the top-level container holding all tracks, tempo map,
+//!   and ticks-per-beat resolution.
+//!
+//! [`MidiData`] can be loaded from a Standard MIDI File (`.mid`) via
+//! [`MidiData::load`], created empty via [`MidiData::new_empty`], or exported
+//! back to SMF via [`MidiData::export_to_file`].
+//!
+//! For playback the [`compile_events`](MidiData::compile_events) method
+//! converts the note list into a sorted sequence of [`TimedEvent`]s
+//! (NoteOn / NoteOff with absolute timestamps in seconds).
+
 use anyhow::Result;
 use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind};
 use std::fs;
@@ -24,16 +41,107 @@ pub struct MidiData {
     pub tempo_map: Vec<(u64, u32)>,
 }
 
+#[derive(Debug, Clone)]
+pub enum MidiEventType {
+    NoteOn { pitch: u8, velocity: u8 },
+    NoteOff { pitch: u8 },
+}
+
+#[derive(Debug, Clone)]
+pub struct TimedEvent {
+    pub time_seconds: f64,
+    pub channel: u8,
+    pub track_index: usize,
+    pub event_type: MidiEventType,
+}
+
 impl MidiData {
-    pub fn new_empty() -> Self {
-        MidiData {
-            tracks: vec![TrackData {
+    pub fn new_empty(track_names: &[String]) -> Self {
+        let mut tracks = Vec::new();
+        if track_names.is_empty() {
+            tracks.push(TrackData {
                 name: "Track 0".to_string(),
                 notes: Vec::new(),
-            }],
+            });
+        } else {
+            for name in track_names {
+                tracks.push(TrackData {
+                    name: name.clone(),
+                    notes: Vec::new(),
+                });
+            }
+        }
+
+        MidiData {
+            tracks,
             ticks_per_beat: 480,
             tempo_map: vec![(0, 500_000)],
         }
+    }
+
+    pub fn compile_events(&self) -> Vec<TimedEvent> {
+        let mut events = Vec::new();
+
+        // Pre-calculate tempo changes for efficient lookup
+        let mut tempo_changes = self.tempo_map.clone();
+        tempo_changes.sort_by_key(|&(t, _)| t);
+
+        let tick_to_seconds = |target_tick: u64| -> f64 {
+            let mut time_sec = 0.0;
+            let mut current_tick = 0;
+            let mut current_tempo = 500_000; // default 120 BPM
+
+            for &(tempo_tick, tempo_val) in &tempo_changes {
+                if tempo_tick > target_tick {
+                    break;
+                }
+                let dt = tempo_tick - current_tick;
+                let bps = current_tempo as f64 / 1_000_000.0;
+                let sec_per_tick = bps / self.ticks_per_beat as f64;
+                time_sec += dt as f64 * sec_per_tick;
+
+                current_tick = tempo_tick;
+                current_tempo = tempo_val;
+            }
+
+            let dt = target_tick - current_tick;
+            let bps = current_tempo as f64 / 1_000_000.0;
+            let sec_per_tick = bps / self.ticks_per_beat as f64;
+            time_sec += dt as f64 * sec_per_tick;
+
+            time_sec
+        };
+
+        for (track_idx, track) in self.tracks.iter().enumerate() {
+            for note in &track.notes {
+                let start_sec = tick_to_seconds(note.start_tick);
+                let end_sec = tick_to_seconds(note.end_tick);
+
+                events.push(TimedEvent {
+                    time_seconds: start_sec,
+                    channel: note.channel,
+                    track_index: track_idx,
+                    event_type: MidiEventType::NoteOn {
+                        pitch: note.pitch,
+                        velocity: note.velocity,
+                    },
+                });
+
+                events.push(TimedEvent {
+                    time_seconds: end_sec,
+                    channel: note.channel,
+                    track_index: track_idx,
+                    event_type: MidiEventType::NoteOff { pitch: note.pitch },
+                });
+            }
+        }
+
+        events.sort_by(|a, b| {
+            a.time_seconds
+                .partial_cmp(&b.time_seconds)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        events
     }
 
     pub fn load(path: &str) -> Result<Self> {

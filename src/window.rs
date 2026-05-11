@@ -1,4 +1,10 @@
-use glib::clone;
+//! GTK4 application window construction and event wiring.
+//!
+//! [`build_ui`] is the `connect_activate` callback registered in `main.rs`.
+//! It assembles the header bar (open / save / play / pause / rewind / BPM /
+//! track selector), the [`PianoRollWidget`], and wires up all user
+//! interactions to the [`Player`] backend.
+
 use gtk::prelude::*;
 use gtk::{ApplicationWindow, Box, Button, DropDown, HeaderBar, StringList};
 use gtk4 as gtk;
@@ -6,11 +12,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::config::AppConfig;
 use crate::midi::MidiData;
 use crate::piano_roll::PianoRollWidget;
 use crate::player::Player;
 
 pub fn build_ui(app: &gtk::Application) {
+    // Load user configuration
+    let config = AppConfig::load();
+
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Rust MIDI Player & Editor")
@@ -30,7 +40,7 @@ pub fn build_ui(app: &gtk::Application) {
     let track_list = StringList::new(&[]);
     let track_dropdown = DropDown::new(Some(track_list.clone()), gtk::Expression::NONE);
 
-    let bpm_adj = gtk::Adjustment::new(120.0, 20.0, 300.0, 1.0, 10.0, 0.0);
+    let bpm_adj = gtk::Adjustment::new(config.default_bpm, 20.0, 300.0, 1.0, 10.0, 0.0);
     let bpm_spin = gtk::SpinButton::new(Some(&bpm_adj), 1.0, 0);
     bpm_spin.set_tooltip_text(Some("BPM"));
     let bpm_box = Box::new(gtk::Orientation::Horizontal, 5);
@@ -50,25 +60,36 @@ pub fn build_ui(app: &gtk::Application) {
     window.set_child(Some(&vbox));
 
     let piano_roll = PianoRollWidget::new();
+    piano_roll.set_default_note_beats(config.default_note_beats);
     vbox.append(&piano_roll);
 
-    let player = Rc::new(RefCell::new(match Player::new("default.sf2") {
-        Ok(p) => Some(p),
-        Err(e) => {
-            eprintln!(
-                "Failed to initialize player: {}. Audio playback disabled.",
-                e
-            );
-            None
-        }
-    }));
+    let player = Rc::new(RefCell::new(
+        match Player::new(&config.soundfont_path, &config.clap_plugin_path) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!(
+                    "Failed to initialize player: {}. Audio playback disabled.",
+                    e
+                );
+                None
+            }
+        },
+    ));
 
     let current_midi_path = Rc::new(RefCell::new(None::<String>));
     let is_playing = Rc::new(RefCell::new(false));
 
     // Initialize with an empty project
-    let empty_data = MidiData::new_empty();
-    track_list.append("Track 0");
+    let synth_names = if let Some(p) = &*player.borrow() {
+        p.get_synth_names()
+    } else {
+        vec!["Track 0".to_string()]
+    };
+    let mut empty_data = MidiData::new_empty(&synth_names);
+    empty_data.set_bpm(config.default_bpm);
+    for name in &synth_names {
+        track_list.append(name);
+    }
     piano_roll.set_data(empty_data);
 
     // Open action
@@ -130,9 +151,8 @@ pub fn build_ui(app: &gtk::Application) {
 
             if *is_playing_bpm.borrow() {
                 if let Some(p) = &*player_bpm.borrow() {
-                    let buf = midi.to_buffer();
                     let new_time = current_tick / (midi.ticks_per_beat as f64 * (new_bpm / 60.0));
-                    if let Err(e) = p.hot_swap(&buf, new_time) {
+                    if let Err(e) = p.hot_swap(midi.clone(), new_time) {
                         eprintln!("Failed to hot-swap on BPM change: {}", e);
                     }
                 }
@@ -167,10 +187,15 @@ pub fn build_ui(app: &gtk::Application) {
         if let Some(midi) = pr_play.get_data_clone() {
             if let Some(p) = &*player_clone.borrow() {
                 if p.is_paused() {
+                    // Re-sync sequencer with current piano roll data before
+                    // resuming so that edits made while paused take effect.
+                    let current_time = p.get_time();
+                    if let Err(e) = p.hot_swap(midi, current_time) {
+                        eprintln!("Failed to hot-swap on resume: {}", e);
+                    }
                     p.resume();
                 } else if !p.is_playing() {
-                    let buf = midi.to_buffer();
-                    if let Err(e) = p.play_buffer(&buf) {
+                    if let Err(e) = p.play(midi) {
                         eprintln!("Failed to play: {}", e);
                     }
                 }
@@ -194,8 +219,7 @@ pub fn build_ui(app: &gtk::Application) {
     rewind_btn.connect_clicked(move |_| {
         if let Some(midi) = pr_rewind.get_data_clone() {
             if let Some(p) = &*player_clone_rewind.borrow() {
-                let buf = midi.to_buffer();
-                if let Err(e) = p.play_buffer(&buf) {
+                if let Err(e) = p.play(midi) {
                     eprintln!("Failed to play: {}", e);
                 } else {
                     *is_playing_rewind.borrow_mut() = true;
@@ -225,10 +249,18 @@ pub fn build_ui(app: &gtk::Application) {
                     *playing = false;
                 } else {
                     if p.is_paused() {
+                        // Re-sync sequencer with current piano roll data
+                        // before resuming so that edits made while paused
+                        // take effect.
+                        if let Some(midi) = pr_key.get_data_clone() {
+                            let current_time = p.get_time();
+                            if let Err(e) = p.hot_swap(midi, current_time) {
+                                eprintln!("Failed to hot-swap on resume: {}", e);
+                            }
+                        }
                         p.resume();
                     } else if let Some(midi) = pr_key.get_data_clone() {
-                        let buf = midi.to_buffer();
-                        if let Err(e) = p.play_buffer(&buf) {
+                        if let Err(e) = p.play(midi) {
                             eprintln!("Failed to play: {}", e);
                         }
                     }
@@ -276,9 +308,8 @@ pub fn build_ui(app: &gtk::Application) {
             if let Some(p) = &*player_data_changed.borrow() {
                 if let Some(midi) = pr_data_changed.get_data_clone() {
                     let current_time = p.get_time();
-                    let buf = midi.to_buffer();
-                    if let Err(e) = p.hot_swap(&buf, current_time) {
-                        eprintln!("Failed to play during hot-swap: {}", e);
+                    if let Err(e) = p.hot_swap(midi, current_time) {
+                        eprintln!("Failed to hot-swap: {}", e);
                     }
                 }
             }
@@ -286,17 +317,26 @@ pub fn build_ui(app: &gtk::Application) {
     });
 
     let player_preview_on = player.clone();
-    piano_roll.connect_preview_note_on(move |pitch, vel| {
+    piano_roll.connect_preview_note_on(move |track_index, pitch, vel| {
         if let Some(p) = &*player_preview_on.borrow() {
-            p.preview_note_on(pitch, vel);
+            p.preview_note_on(track_index, pitch, vel);
         }
     });
 
     let player_preview_off = player.clone();
-    piano_roll.connect_preview_note_off(move |pitch| {
+    piano_roll.connect_preview_note_off(move |track_index, pitch| {
         if let Some(p) = &*player_preview_off.borrow() {
-            p.preview_note_off(pitch);
+            p.preview_note_off(track_index, pitch);
         }
+    });
+
+    // Gracefully shut down audio on window close to avoid pop/click.
+    let player_shutdown = player.clone();
+    window.connect_close_request(move |_| {
+        if let Some(p) = &*player_shutdown.borrow() {
+            p.shutdown();
+        }
+        glib::Propagation::Proceed
     });
 
     window.present();
