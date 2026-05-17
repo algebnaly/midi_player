@@ -6,11 +6,11 @@
 //! # Sub-modules
 //!
 //! * [`host`] – Host handler types, extension implementations, and host metadata.
-//! * [`wrapper`] – [`ClapPluginWrapper`] which manages the full plugin lifecycle
-//!   (load → activate → process → note I/O).
+//! * [`wrapper`] – [`ClapPluginWrapper`] (audio thread) and [`ClapPluginGuiHandle`]
+//!   (main thread) which together manage the full plugin lifecycle.
 
 mod host;
 mod wrapper;
 
 pub use host::*;
-pub use wrapper::ClapPluginWrapper;
+pub use wrapper::{ClapPluginGuiHandle, ClapPluginWrapper};

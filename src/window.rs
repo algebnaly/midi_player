@@ -17,6 +17,16 @@ use crate::midi::MidiData;
 use crate::piano_roll::PianoRollWidget;
 use crate::player::Player;
 
+/// Try to get the X11 window ID from a GTK4 window.
+///
+/// Returns `None` on Wayland or if the X11 backend is not in use.
+fn get_x11_xid(window: &ApplicationWindow) -> Option<u64> {
+    use gtk::prelude::NativeExt;
+    let surface = window.native()?.surface()?;
+    let x11_surface = surface.downcast_ref::<gdk4_x11::X11Surface>()?;
+    Some(x11_surface.xid() as u64)
+}
+
 pub fn build_ui(app: &gtk::Application) {
     // Load user configuration
     let config = AppConfig::load();
@@ -47,9 +57,12 @@ pub fn build_ui(app: &gtk::Application) {
     bpm_box.append(&gtk::Label::new(Some("BPM: ")));
     bpm_box.append(&bpm_spin);
 
+    let plugin_gui_btn = Button::with_label("Plugin GUI");
+
     header_bar.pack_start(&open_btn);
     header_bar.pack_start(&save_btn);
     header_bar.pack_start(&track_dropdown);
+    header_bar.pack_start(&plugin_gui_btn);
     header_bar.pack_start(&bpm_box);
 
     header_bar.pack_end(&rewind_btn);
@@ -330,13 +343,44 @@ pub fn build_ui(app: &gtk::Application) {
         }
     });
 
+    // Plugin GUI button: toggle the CLAP plugin's floating window.
+    let player_gui = player.clone();
+    let window_for_gui = window.clone();
+    let track_dropdown_gui = track_dropdown.clone();
+    plugin_gui_btn.connect_clicked(move |_btn| {
+        let track = track_dropdown_gui.selected() as usize;
+        if let Some(p) = &mut *player_gui.borrow_mut() {
+            if p.is_plugin_gui_open(track) {
+                p.close_plugin_gui(track);
+            } else {
+                let xid = get_x11_xid(&window_for_gui);
+                p.open_plugin_gui(track, xid);
+            }
+        }
+    });
+
     // Gracefully shut down audio on window close to avoid pop/click.
     let player_shutdown = player.clone();
     window.connect_close_request(move |_| {
-        if let Some(p) = &*player_shutdown.borrow() {
+        if let Some(p) = &mut *player_shutdown.borrow_mut() {
+            // Close any open plugin GUIs before shutting down audio.
+            for i in 0..p.gui_handle_count() {
+                p.close_plugin_gui(i);
+            }
             p.shutdown();
         }
         glib::Propagation::Proceed
+    });
+
+    // Poll CLAP plugin callbacks every 16 ms (~60 Hz).
+    // This ensures `on_main_thread()` is called when plugins request it
+    // (e.g. to sync GUI state changes to the audio thread).
+    let player_poll = player.clone();
+    glib::timeout_add_local(Duration::from_millis(16), move || {
+        if let Some(p) = &mut *player_poll.borrow_mut() {
+            p.poll_plugin_callbacks();
+        }
+        glib::ControlFlow::Continue
     });
 
     window.present();

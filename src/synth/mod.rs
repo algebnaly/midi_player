@@ -67,8 +67,8 @@ impl TrackSynth {
     /// Silence all currently-sounding notes on every channel.
     ///
     /// For SoundFont this sends `AllNotesOff` on channels 0–15.
-    /// For CLAP plugins this sends individual `NoteOff` for all 128 keys × 16
-    /// channels (the CLAP spec has no equivalent of an "all notes off" event).
+    /// For CLAP plugins this sends individual NoteOff only for notes that are
+    /// currently tracked as active, avoiding the overhead of 2048 events.
     pub fn all_notes_off(&mut self) {
         match self {
             TrackSynth::SoundFont(s) => {
@@ -77,11 +77,7 @@ impl TrackSynth {
                 }
             }
             TrackSynth::ClapPlugin(c) => {
-                for ch in 0..16 {
-                    for key in 0..128 {
-                        c.send_note_off(ch, key);
-                    }
-                }
+                c.send_all_notes_off();
             }
         }
     }
@@ -98,6 +94,20 @@ impl TrackSynth {
             TrackSynth::ClapPlugin(c) => {
                 c.render_block(left, right);
             }
+        }
+    }
+
+    /// Update the transport tempo (BPM).  Only relevant for CLAP plugins.
+    pub fn set_tempo(&mut self, bpm: f64) {
+        if let TrackSynth::ClapPlugin(c) = self {
+            c.set_tempo(bpm);
+        }
+    }
+
+    /// Update the transport playing state.  Only relevant for CLAP plugins.
+    pub fn set_playing(&mut self, playing: bool) {
+        if let TrackSynth::ClapPlugin(c) = self {
+            c.set_playing(playing);
         }
     }
 }

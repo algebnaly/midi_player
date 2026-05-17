@@ -18,6 +18,10 @@ use crate::synth::TrackSynth;
 /// Number of beats per bar (time signature numerator).
 const BEATS_PER_BAR: u64 = 4;
 
+/// Tolerance (in seconds) for dispatching events at the current playhead.
+/// At 48 kHz this is ~4.8 samples.
+const EVENT_DISPATCH_TOLERANCE_SECS: f64 = 0.0001;
+
 /// Sample-accurate MIDI event sequencer with automatic looping.
 ///
 /// Maintains a sorted event list and a playhead position.  On each
@@ -38,6 +42,10 @@ pub struct CustomSequencer {
     /// End of the loop region in seconds (computed on [`load`](Self::load)).
     /// When the playhead reaches this point, playback loops back to 0.
     pub loop_end_time: f64,
+    /// Pre-allocated per-track work buffers (avoids heap allocation in the
+    /// real-time callback).  Grown on demand.
+    track_buf_l: Vec<f32>,
+    track_buf_r: Vec<f32>,
 }
 
 impl CustomSequencer {
@@ -48,6 +56,8 @@ impl CustomSequencer {
             playhead_time: 0.0,
             current_event_idx: 0,
             loop_end_time: 0.0,
+            track_buf_l: vec![0.0f32; 4096],
+            track_buf_r: vec![0.0f32; 4096],
         }
     }
 
@@ -142,6 +152,20 @@ impl CustomSequencer {
                 self.current_event_idx = 0;
             }
 
+            // Dispatch any events whose time has been reached (before rendering).
+            while self.current_event_idx < self.events.len() {
+                let ev = &self.events[self.current_event_idx];
+                if ev.time_seconds <= self.playhead_time + EVENT_DISPATCH_TOLERANCE_SECS {
+                    let synth_idx = ev.track_index % synths.len();
+                    if let Some(synth) = synths.get_mut(synth_idx) {
+                        synth.send_midi_event(ev.channel, &ev.event_type);
+                    }
+                    self.current_event_idx += 1;
+                } else {
+                    break;
+                }
+            }
+
             // How many frames until the next event?
             let frames_to_next_event = if self.current_event_idx < self.events.len() {
                 let event_time = self.events[self.current_event_idx].time_seconds;
@@ -179,13 +203,17 @@ impl CustomSequencer {
                 right[frames_rendered..end_idx].fill(0.0);
 
                 // Per-track render + additive mix.
-                let mut track_left = vec![0.0f32; chunk_frames];
-                let mut track_right = vec![0.0f32; chunk_frames];
+                if self.track_buf_l.len() < chunk_frames {
+                    self.track_buf_l.resize(chunk_frames, 0.0);
+                    self.track_buf_r.resize(chunk_frames, 0.0);
+                }
+                let track_left = &mut self.track_buf_l[..chunk_frames];
+                let track_right = &mut self.track_buf_r[..chunk_frames];
 
                 for synth in synths.iter_mut() {
                     track_left.fill(0.0);
                     track_right.fill(0.0);
-                    synth.render(&mut track_left, &mut track_right);
+                    synth.render(track_left, track_right);
 
                     for i in 0..chunk_frames {
                         left[frames_rendered + i] += track_left[i];
@@ -195,20 +223,6 @@ impl CustomSequencer {
 
                 frames_rendered += chunk_frames;
                 self.playhead_time += chunk_frames as f64 / sample_rate;
-            }
-
-            // Dispatch any events whose time has been reached.
-            while self.current_event_idx < self.events.len() {
-                let ev = &self.events[self.current_event_idx];
-                if ev.time_seconds <= self.playhead_time + 0.0001 {
-                    let synth_idx = ev.track_index % synths.len();
-                    if let Some(synth) = synths.get_mut(synth_idx) {
-                        synth.send_midi_event(ev.channel, &ev.event_type);
-                    }
-                    self.current_event_idx += 1;
-                } else {
-                    break;
-                }
             }
         }
     }

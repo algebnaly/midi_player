@@ -11,7 +11,7 @@
 //! * [`TrackSynth`](crate::synth::TrackSynth) – per-track audio rendering.
 
 use crate::audio_engine::AudioEngine;
-use crate::clap_host::ClapPluginWrapper;
+use crate::clap_host::{ClapPluginGuiHandle, ClapPluginWrapper};
 use crate::midi::MidiData;
 use crate::sequencer::CustomSequencer;
 use crate::synth::TrackSynth;
@@ -38,6 +38,9 @@ pub struct Player {
     silence_flushed: Arc<AtomicBool>,
     /// A snapshot of the currently loaded MIDI data (for hot-swap).
     current_midi: Arc<Mutex<Option<MidiData>>>,
+    /// Main-thread GUI handles for CLAP plugins.  Indexed by track.
+    /// `None` for SoundFont tracks.
+    clap_gui_handles: Vec<Option<ClapPluginGuiHandle>>,
     /// The sample rate negotiated with the audio device (Hz).
     #[allow(dead_code)]
     sample_rate: f64,
@@ -60,11 +63,13 @@ impl Player {
         main_synth.add_font(font, true);
 
         let mut synths_vec = vec![TrackSynth::SoundFont(main_synth)];
+        let mut gui_handles: Vec<Option<ClapPluginGuiHandle>> = vec![None]; // SoundFont track
 
         // Try loading a CLAP plugin.
-        if let Ok(clap) = ClapPluginWrapper::new(clap_path, 44100) {
+        if let Ok((clap_wrapper, gui_handle)) = ClapPluginWrapper::new(clap_path, 44100) {
             println!("Loaded CLAP plugin successfully from {}", clap_path);
-            synths_vec.push(TrackSynth::ClapPlugin(clap));
+            synths_vec.push(TrackSynth::ClapPlugin(clap_wrapper));
+            gui_handles.push(Some(gui_handle));
         } else {
             println!("No CLAP plugin loaded from {}", clap_path);
         }
@@ -110,6 +115,7 @@ impl Player {
             paused,
             silence_flushed,
             current_midi: Arc::new(Mutex::new(None)),
+            clap_gui_handles: gui_handles,
             sample_rate,
         })
     }
@@ -120,9 +126,16 @@ impl Player {
 
     /// Start playing the given MIDI data from the beginning.
     pub fn play(&self, data: MidiData) -> anyhow::Result<()> {
+        let bpm = data.get_bpm();
         *self.current_midi.lock().unwrap() = Some(data.clone());
         let mut seq = self.sequencer.lock().unwrap();
         seq.load(&data);
+        // Propagate BPM to CLAP plugins so their transport matches.
+        if let Ok(mut s_vec) = self.synths.lock() {
+            for synth in s_vec.iter_mut() {
+                synth.set_tempo(bpm);
+            }
+        }
         self.paused.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -197,10 +210,15 @@ impl Player {
     /// Replace the current MIDI data and seek to `time` without interrupting
     /// playback.  Used for live editing (hot-swap on BPM change or note edit).
     pub fn hot_swap(&self, data: MidiData, time: f64) -> anyhow::Result<()> {
+        let bpm = data.get_bpm();
         let mut seq = self.sequencer.lock().unwrap();
         let mut s_vec = self.synths.lock().unwrap();
         seq.load(&data);
         seq.seek(time, &mut s_vec);
+        // Propagate BPM to CLAP plugins.
+        for synth in s_vec.iter_mut() {
+            synth.set_tempo(bpm);
+        }
         *self.current_midi.lock().unwrap() = Some(data);
         Ok(())
     }
@@ -256,6 +274,60 @@ impl Player {
             let idx = track_index % synths.len();
             if let Some(synth) = synths.get_mut(idx) {
                 synth.send_midi_event(0, &crate::midi::MidiEventType::NoteOff { pitch });
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Plugin GUI
+    // ------------------------------------------------------------------
+
+    /// Whether the given track has a CLAP plugin that supports GUI.
+    pub fn track_supports_gui(&self, track_index: usize) -> bool {
+        self.clap_gui_handles
+            .get(track_index)
+            .is_some_and(|h| h.as_ref().is_some_and(|g| g.supports_gui()))
+    }
+
+    /// Open the CLAP plugin GUI for the given track.
+    ///
+    /// `parent_xid` is the X11 window ID of the GTK window (for transient
+    /// linkage).  Pass `None` on Wayland or if unavailable.
+    pub fn open_plugin_gui(&mut self, track_index: usize, parent_xid: Option<u64>) {
+        if let Some(Some(gui)) = self.clap_gui_handles.get_mut(track_index) {
+            if let Err(e) = gui.open_gui(parent_xid) {
+                eprintln!("Failed to open plugin GUI: {}", e);
+            }
+        }
+    }
+
+    /// Close the CLAP plugin GUI for the given track.
+    pub fn close_plugin_gui(&mut self, track_index: usize) {
+        if let Some(Some(gui)) = self.clap_gui_handles.get_mut(track_index) {
+            gui.close_gui();
+        }
+    }
+
+    /// Whether the CLAP plugin GUI for the given track is currently open.
+    pub fn is_plugin_gui_open(&self, track_index: usize) -> bool {
+        self.clap_gui_handles
+            .get(track_index)
+            .is_some_and(|h| h.as_ref().is_some_and(|g| g.is_gui_open()))
+    }
+
+    /// The number of GUI handle slots (one per track).
+    pub fn gui_handle_count(&self) -> usize {
+        self.clap_gui_handles.len()
+    }
+
+    /// Poll all CLAP plugin instances for pending main-thread callbacks.
+    ///
+    /// Must be called periodically from the GTK main loop (e.g. every 16 ms)
+    /// to keep plugin state synchronised.
+    pub fn poll_plugin_callbacks(&mut self) {
+        for handle in &mut self.clap_gui_handles {
+            if let Some(gui) = handle {
+                gui.poll_callbacks();
             }
         }
     }
