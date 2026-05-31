@@ -32,6 +32,7 @@ pub struct Note {
 pub struct TrackData {
     pub name: String,
     pub notes: Vec<Note>,
+    pub synth_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +53,7 @@ pub struct TimedEvent {
     pub time_seconds: f64,
     pub channel: u8,
     pub track_index: usize,
+    pub synth_index: usize,
     pub event_type: MidiEventType,
 }
 
@@ -62,12 +64,14 @@ impl MidiData {
             tracks.push(TrackData {
                 name: "Track 0".to_string(),
                 notes: Vec::new(),
+                synth_index: 0,
             });
         } else {
-            for name in track_names {
+            for (synth_index, name) in track_names.iter().enumerate() {
                 tracks.push(TrackData {
                     name: name.clone(),
                     notes: Vec::new(),
+                    synth_index,
                 });
             }
         }
@@ -121,6 +125,7 @@ impl MidiData {
                     time_seconds: start_sec,
                     channel: note.channel,
                     track_index: track_idx,
+                    synth_index: track.synth_index,
                     event_type: MidiEventType::NoteOn {
                         pitch: note.pitch,
                         velocity: note.velocity,
@@ -131,6 +136,7 @@ impl MidiData {
                     time_seconds: end_sec,
                     channel: note.channel,
                     track_index: track_idx,
+                    synth_index: track.synth_index,
                     event_type: MidiEventType::NoteOff { pitch: note.pitch },
                 });
             }
@@ -156,12 +162,12 @@ impl MidiData {
         let mut tracks = Vec::new();
         let mut tempo_map = vec![(0, 500_000)];
 
-        for (i, track) in smf.tracks.iter().enumerate() {
+        for track in &smf.tracks {
             let mut current_tick = 0;
             let mut active_notes: std::collections::HashMap<(u8, u8), (u64, u8)> =
                 std::collections::HashMap::new();
             let mut notes = Vec::new();
-            let mut name = format!("Track {}", i);
+            let mut name = None;
 
             for event in track {
                 current_tick += event.delta.as_int() as u64;
@@ -204,10 +210,16 @@ impl MidiData {
                     }
                     TrackEventKind::Meta(meta) => match meta {
                         MetaMessage::Tempo(tempo) => {
-                            tempo_map.push((current_tick, tempo.as_int()));
+                            if let Some((_, existing)) =
+                                tempo_map.iter_mut().find(|(tick, _)| *tick == current_tick)
+                            {
+                                *existing = tempo.as_int();
+                            } else {
+                                tempo_map.push((current_tick, tempo.as_int()));
+                            }
                         }
                         MetaMessage::TrackName(n) => {
-                            name = String::from_utf8_lossy(n).into_owned();
+                            name = Some(String::from_utf8_lossy(n).into_owned());
                         }
                         _ => {}
                     },
@@ -216,7 +228,21 @@ impl MidiData {
             }
 
             notes.sort_by_key(|n| n.start_tick);
-            tracks.push(TrackData { name, notes });
+            if !notes.is_empty() {
+                tracks.push(TrackData {
+                    name: name.unwrap_or_else(|| format!("Track {}", tracks.len())),
+                    notes,
+                    synth_index: 0,
+                });
+            }
+        }
+
+        if tracks.is_empty() {
+            tracks.push(TrackData {
+                name: "Track 0".to_string(),
+                notes: Vec::new(),
+                synth_index: 0,
+            });
         }
 
         tempo_map.sort_by_key(|t| t.0);

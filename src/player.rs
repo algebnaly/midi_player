@@ -209,11 +209,15 @@ impl Player {
 
     /// Replace the current MIDI data and seek to `time` without interrupting
     /// playback.  Used for live editing (hot-swap on BPM change or note edit).
+    ///
+    /// Uses [`load_for_hot_swap`](CustomSequencer::load_for_hot_swap) so that
+    /// the subsequent [`seek`](CustomSequencer::seek) can diff active notes
+    /// instead of re-triggering everything.
     pub fn hot_swap(&self, data: MidiData, time: f64) -> anyhow::Result<()> {
         let bpm = data.get_bpm();
         let mut seq = self.sequencer.lock().unwrap();
         let mut s_vec = self.synths.lock().unwrap();
-        seq.load(&data);
+        seq.load_for_hot_swap(&data);
         seq.seek(time, &mut s_vec);
         // Propagate BPM to CLAP plugins.
         for synth in s_vec.iter_mut() {
@@ -258,20 +262,20 @@ impl Player {
     // Note preview (live auditioning from piano roll)
     // ------------------------------------------------------------------
 
-    /// Send a preview Note-On to the synth at `track_index`.
-    pub fn preview_note_on(&self, track_index: usize, pitch: u8, velocity: u8) {
+    /// Send a preview Note-On to the synth at `synth_index`.
+    pub fn preview_note_on(&self, synth_index: usize, pitch: u8, velocity: u8) {
         if let Ok(mut synths) = self.synths.lock() {
-            let idx = track_index % synths.len();
+            let idx = synth_index % synths.len();
             if let Some(synth) = synths.get_mut(idx) {
                 synth.send_midi_event(0, &crate::midi::MidiEventType::NoteOn { pitch, velocity });
             }
         }
     }
 
-    /// Send a preview Note-Off to the synth at `track_index`.
-    pub fn preview_note_off(&self, track_index: usize, pitch: u8) {
+    /// Send a preview Note-Off to the synth at `synth_index`.
+    pub fn preview_note_off(&self, synth_index: usize, pitch: u8) {
         if let Ok(mut synths) = self.synths.lock() {
-            let idx = track_index % synths.len();
+            let idx = synth_index % synths.len();
             if let Some(synth) = synths.get_mut(idx) {
                 synth.send_midi_event(0, &crate::midi::MidiEventType::NoteOff { pitch });
             }

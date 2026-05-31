@@ -21,7 +21,7 @@ use std::cell::RefCell;
 
 const KEY_WIDTH: f64 = 70.0;
 const BEATS_PER_BAR: u64 = 4;
-const SNAP_SUBDIVISIONS: u64 = 4; // snap to 1/4 beat (16th notes)
+const SNAP_SUBDIVISIONS: u64 = 8; // snap to 1/8 beat (32nd notes)
 
 fn snap_tick(tick: u64, ticks_per_beat: u16) -> u64 {
     let grid = ticks_per_beat as u64 / SNAP_SUBDIVISIONS;
@@ -29,15 +29,6 @@ fn snap_tick(tick: u64, ticks_per_beat: u16) -> u64 {
         return tick;
     }
     ((tick + grid / 2) / grid) * grid
-}
-
-fn snap_tick_beat(tick: u64, ticks_per_beat: u16) -> u64 {
-    let grid = ticks_per_beat as u64;
-    if grid == 0 {
-        return tick;
-    }
-    // Floor division so clicking anywhere inside a beat snaps to the start of that beat
-    (tick / grid) * grid
 }
 
 mod imp {
@@ -366,6 +357,12 @@ impl PianoRollWidget {
         (pitch_f.floor() as i32).clamp(0, 127) as u8
     }
 
+    fn active_synth_index(&self) -> usize {
+        let imp = self.imp();
+        let track_idx = *imp.active_track.borrow();
+        self.track_synth_index(track_idx)
+    }
+
     /// Shared drag position update logic, called from both `drag_update` and
     /// the scroll handler (so dragged items track the cursor even when the
     /// viewport is scrolled mid-drag).
@@ -412,6 +409,7 @@ impl PianoRollWidget {
             let current_abs_x = sx + dx + ox;
             // Convert to ticks
             let cursor_tick = (current_abs_x / zx) * tps;
+            let synth_index = midi.tracks[act].synth_index;
 
             let n = &mut midi.tracks[act].notes[idx];
 
@@ -439,10 +437,10 @@ impl PianoRollWidget {
                 if let Some(active) = active_opt {
                     if active != np {
                         if let Some(cb) = &*imp.preview_note_off_callback.borrow() {
-                            cb(*imp.active_track.borrow(), active);
+                            cb(synth_index, active);
                         }
                         if let Some(cb) = &*imp.preview_note_on_callback.borrow() {
-                            cb(*imp.active_track.borrow(), np, orig.velocity);
+                            cb(synth_index, np, orig.velocity);
                         }
                         *imp.preview_active_pitch.borrow_mut() = Some(np);
                     }
@@ -536,11 +534,12 @@ impl PianoRollWidget {
             let act_track = *imp.active_track.borrow();
             let target_pitch = obj_d.screen_to_pitch(start_y);
 
-            let mut found_note: Option<(usize, Note, imp::NoteDragMode)> = None;
+            let mut found_note: Option<(usize, Note, imp::NoteDragMode, usize)> = None;
             let mut tps = 1.0;
             if let Some(midi) = &*imp.data.borrow() {
                 tps = (midi.ticks_per_beat as f64) * (midi.get_bpm() / 60.0);
                 if act_track < midi.tracks.len() {
+                    let synth_index = midi.tracks[act_track].synth_index;
                     for (i, note) in midi.tracks[act_track].notes.iter().enumerate() {
                         let nx = (note.start_tick as f64 / tps) * zx;
                         let nw = ((note.end_tick - note.start_tick) as f64 / tps) * zx;
@@ -554,14 +553,14 @@ impl PianoRollWidget {
                             } else {
                                 imp::NoteDragMode::Move
                             };
-                            found_note = Some((i, note.clone(), drag_mode));
+                            found_note = Some((i, note.clone(), drag_mode, synth_index));
                             break;
                         }
                     }
                 }
             }
 
-            if let Some((idx, note, drag_mode)) = found_note {
+            if let Some((idx, note, drag_mode, synth_index)) = found_note {
                 *imp.selected_note.borrow_mut() = Some(idx);
                 *imp.drag_orig_note.borrow_mut() = Some(note.clone());
                 *imp.note_drag_mode.borrow_mut() = drag_mode;
@@ -569,7 +568,7 @@ impl PianoRollWidget {
                 let click_tick = (abs_x / zx) * tps;
                 *imp.drag_click_offset_ticks.borrow_mut() = click_tick - note.start_tick as f64;
                 if let Some(cb) = &*imp.preview_note_on_callback.borrow() {
-                    cb(*imp.active_track.borrow(), note.pitch, note.velocity);
+                    cb(synth_index, note.pitch, note.velocity);
                 }
                 *imp.preview_active_pitch.borrow_mut() = Some(note.pitch);
                 obj_d.set_cursor_from_name(if drag_mode == imp::NoteDragMode::ResizeDuration {
@@ -580,10 +579,12 @@ impl PianoRollWidget {
                 obj_d.queue_draw();
             } else {
                 // Create new note with snap
+                let mut synth_index = act_track;
                 if let Some(midi) = &mut *imp.data.borrow_mut() {
                     if act_track < midi.tracks.len() {
+                        synth_index = midi.tracks[act_track].synth_index;
                         let raw_tick = ((abs_x / zx) * tps) as u64;
-                        let start_tick = snap_tick_beat(raw_tick, midi.ticks_per_beat);
+                        let start_tick = snap_tick(raw_tick, midi.ticks_per_beat);
                         let note_len = (*imp.default_note_beats.borrow()
                             * midi.ticks_per_beat as f64)
                             .round() as u64;
@@ -613,7 +614,7 @@ impl PianoRollWidget {
                 }
                 // Now send preview NoteOn — after hot_swap is done.
                 if let Some(cb) = &*imp.preview_note_on_callback.borrow() {
-                    cb(*imp.active_track.borrow(), target_pitch, 100);
+                    cb(synth_index, target_pitch, 100);
                 }
             }
         });
@@ -645,7 +646,7 @@ impl PianoRollWidget {
                 let active_opt = *imp.preview_active_pitch.borrow();
                 if let Some(active) = active_opt {
                     if let Some(cb) = &*imp.preview_note_off_callback.borrow() {
-                        cb(*imp.active_track.borrow(), active);
+                        cb(obj_e.active_synth_index(), active);
                     }
                     *imp.preview_active_pitch.borrow_mut() = None;
                 }
@@ -819,6 +820,7 @@ impl PianoRollWidget {
 
     pub fn set_data(&self, midi: MidiData) {
         *self.imp().data.borrow_mut() = Some(midi);
+        *self.imp().active_track.borrow_mut() = 0;
         *self.imp().selected_note.borrow_mut() = None;
         self.queue_draw();
     }
@@ -875,6 +877,16 @@ impl PianoRollWidget {
 
     pub fn get_data_clone(&self) -> Option<MidiData> {
         self.imp().data.borrow().clone()
+    }
+
+    pub fn track_synth_index(&self, track_idx: usize) -> usize {
+        self.imp()
+            .data
+            .borrow()
+            .as_ref()
+            .and_then(|midi| midi.tracks.get(track_idx))
+            .map(|track| track.synth_index)
+            .unwrap_or(track_idx)
     }
 
     /// Set the default note duration in beats (from user config).

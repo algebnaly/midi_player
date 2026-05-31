@@ -110,6 +110,7 @@ pub fn build_ui(app: &gtk::Application) {
     let current_midi_clone = current_midi_path.clone();
     let piano_roll_clone = piano_roll.clone();
     let track_list_clone = track_list.clone();
+    let track_dropdown_open = track_dropdown.clone();
     let bpm_spin_open = bpm_spin.clone();
 
     open_btn.connect_clicked(move |_| {
@@ -118,6 +119,7 @@ pub fn build_ui(app: &gtk::Application) {
         let midi_path = current_midi_clone.clone();
         let pr = piano_roll_clone.clone();
         let tl = track_list_clone.clone();
+        let td = track_dropdown_open.clone();
         let bpm_spin_inner = bpm_spin_open.clone();
 
         dialog.open(Some(&window), None::<&gtk::gio::Cancellable>, move |res| {
@@ -140,6 +142,7 @@ pub fn build_ui(app: &gtk::Application) {
                         let bpm = data.get_bpm();
                         bpm_spin_inner.set_value(bpm);
                         pr.set_data(data);
+                        td.set_selected(0);
                         pr.set_playhead(0.0);
                     }
                     Err(e) => eprintln!("Failed to load midi: {}", e),
@@ -330,16 +333,16 @@ pub fn build_ui(app: &gtk::Application) {
     });
 
     let player_preview_on = player.clone();
-    piano_roll.connect_preview_note_on(move |track_index, pitch, vel| {
+    piano_roll.connect_preview_note_on(move |synth_index, pitch, vel| {
         if let Some(p) = &*player_preview_on.borrow() {
-            p.preview_note_on(track_index, pitch, vel);
+            p.preview_note_on(synth_index, pitch, vel);
         }
     });
 
     let player_preview_off = player.clone();
-    piano_roll.connect_preview_note_off(move |track_index, pitch| {
+    piano_roll.connect_preview_note_off(move |synth_index, pitch| {
         if let Some(p) = &*player_preview_off.borrow() {
-            p.preview_note_off(track_index, pitch);
+            p.preview_note_off(synth_index, pitch);
         }
     });
 
@@ -347,14 +350,16 @@ pub fn build_ui(app: &gtk::Application) {
     let player_gui = player.clone();
     let window_for_gui = window.clone();
     let track_dropdown_gui = track_dropdown.clone();
+    let piano_roll_gui = piano_roll.clone();
     plugin_gui_btn.connect_clicked(move |_btn| {
         let track = track_dropdown_gui.selected() as usize;
+        let synth_index = piano_roll_gui.track_synth_index(track);
         if let Some(p) = &mut *player_gui.borrow_mut() {
-            if p.is_plugin_gui_open(track) {
-                p.close_plugin_gui(track);
+            if p.is_plugin_gui_open(synth_index) {
+                p.close_plugin_gui(synth_index);
             } else {
                 let xid = get_x11_xid(&window_for_gui);
-                p.open_plugin_gui(track, xid);
+                p.open_plugin_gui(synth_index, xid);
             }
         }
     });

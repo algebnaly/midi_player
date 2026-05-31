@@ -12,7 +12,7 @@ use std::path::PathBuf;
 pub struct AppConfig {
     /// Default BPM for new projects.
     pub default_bpm: f64,
-    /// Default note duration in beats (e.g. 1.0 = quarter note, 0.5 = eighth).
+    /// Default note duration in beats (e.g. 1.0 = quarter note, 0.125 = 32nd).
     pub default_note_beats: f64,
     /// Path to the default SoundFont file.
     pub soundfont_path: String,

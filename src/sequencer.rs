@@ -14,6 +14,7 @@
 
 use crate::midi::{MidiData, TimedEvent};
 use crate::synth::TrackSynth;
+use std::collections::HashMap;
 
 /// Number of beats per bar (time signature numerator).
 const BEATS_PER_BAR: u64 = 4;
@@ -21,6 +22,9 @@ const BEATS_PER_BAR: u64 = 4;
 /// Tolerance (in seconds) for dispatching events at the current playhead.
 /// At 48 kHz this is ~4.8 samples.
 const EVENT_DISPATCH_TOLERANCE_SECS: f64 = 0.0001;
+
+/// Key identifying a single note voice: (track_index, channel, pitch).
+type NoteKey = (usize, u8, u8);
 
 /// Sample-accurate MIDI event sequencer with automatic looping.
 ///
@@ -46,6 +50,10 @@ pub struct CustomSequencer {
     /// real-time callback).  Grown on demand.
     track_buf_l: Vec<f32>,
     track_buf_r: Vec<f32>,
+    /// Notes currently sounding, tracked so that `seek()` can diff against the
+    /// new target state instead of blindly re-triggering everything.
+    /// Key: (track_index, channel, pitch) → (synth_index, velocity).
+    active_notes: HashMap<NoteKey, (usize, u8)>,
 }
 
 impl CustomSequencer {
@@ -58,6 +66,7 @@ impl CustomSequencer {
             loop_end_time: 0.0,
             track_buf_l: vec![0.0f32; 4096],
             track_buf_r: vec![0.0f32; 4096],
+            active_notes: HashMap::new(),
         }
     }
 
@@ -70,6 +79,21 @@ impl CustomSequencer {
         self.current_event_idx = 0;
         self.playhead_time = 0.0;
         self.loop_end_time = Self::compute_loop_end(data);
+        self.active_notes.clear();
+    }
+
+    /// Replace the event list without clearing `active_notes`.
+    ///
+    /// Used by hot-swap: the caller will immediately follow with
+    /// [`seek()`](Self::seek) which diffs the old active set against the
+    /// target set, avoiding audible re-triggers for notes that are still
+    /// sustaining at the seek position.
+    pub fn load_for_hot_swap(&mut self, data: &MidiData) {
+        self.events = data.compile_events();
+        self.current_event_idx = 0;
+        self.playhead_time = 0.0;
+        self.loop_end_time = Self::compute_loop_end(data);
+        // Deliberately do NOT clear active_notes — seek() will diff.
     }
 
     /// Reset the playhead to the beginning without changing the event list.
@@ -77,24 +101,22 @@ impl CustomSequencer {
     pub fn reset(&mut self) {
         self.playhead_time = 0.0;
         self.current_event_idx = 0;
+        self.active_notes.clear();
     }
 
     /// Seek to an arbitrary point in time.
     ///
-    /// Silences all synths, advances `current_event_idx` past any events
-    /// before `time`, then re-sends NoteOn for notes that should still be
-    /// sounding at the new position (so that `hot_swap` doesn't cut off
-    /// in-progress notes).
+    /// Computes which notes should be active at the target `time` and applies
+    /// a **diff** against the currently-tracked active notes.  Notes that were
+    /// already sounding and should continue are left untouched (no re-trigger),
+    /// notes that should stop receive NoteOff, and notes that should start
+    /// receive NoteOn.  This avoids the audible re-attack that would result
+    /// from a blanket `all_notes_off` + re-trigger cycle.
     pub fn seek(&mut self, time: f64, synths: &mut [TrackSynth]) {
         self.playhead_time = time;
-        for synth in synths.iter_mut() {
-            synth.all_notes_off();
-        }
 
-        // Scan events before `time` to find notes still active at the seek point.
-        // Key: (track_index, channel, pitch) → velocity
-        use std::collections::HashMap;
-        let mut active: HashMap<(usize, u8, u8), u8> = HashMap::new();
+        // Compute the set of notes that *should* be active at `time`.
+        let mut target_active: HashMap<NoteKey, (usize, u8)> = HashMap::new();
 
         self.current_event_idx = 0;
         while self.current_event_idx < self.events.len()
@@ -103,28 +125,51 @@ impl CustomSequencer {
             let ev = &self.events[self.current_event_idx];
             match &ev.event_type {
                 crate::midi::MidiEventType::NoteOn { pitch, velocity } => {
-                    active.insert((ev.track_index, ev.channel, *pitch), *velocity);
+                    target_active.insert(
+                        (ev.track_index, ev.channel, *pitch),
+                        (ev.synth_index, *velocity),
+                    );
                 }
                 crate::midi::MidiEventType::NoteOff { pitch } => {
-                    active.remove(&(ev.track_index, ev.channel, *pitch));
+                    target_active.remove(&(ev.track_index, ev.channel, *pitch));
                 }
             }
             self.current_event_idx += 1;
         }
 
-        // Re-trigger notes that should still be sounding.
-        for ((track_idx, channel, pitch), velocity) in &active {
-            let synth_idx = track_idx % synths.len();
-            if let Some(synth) = synths.get_mut(synth_idx) {
-                synth.send_midi_event(
-                    *channel,
-                    &crate::midi::MidiEventType::NoteOn {
-                        pitch: *pitch,
-                        velocity: *velocity,
-                    },
-                );
+        // Send NoteOff for notes that are currently active but should NOT be.
+        for (key, (synth_index, _vel)) in &self.active_notes {
+            if !target_active.contains_key(key) {
+                let (_track_idx, channel, pitch) = key;
+                let synth_idx = synth_index % synths.len();
+                if let Some(synth) = synths.get_mut(synth_idx) {
+                    synth.send_midi_event(
+                        *channel,
+                        &crate::midi::MidiEventType::NoteOff { pitch: *pitch },
+                    );
+                }
             }
         }
+
+        // Send NoteOn for notes that should be active but are NOT currently.
+        for (key, (synth_index, velocity)) in &target_active {
+            if !self.active_notes.contains_key(key) {
+                let (_track_idx, channel, pitch) = key;
+                let synth_idx = synth_index % synths.len();
+                if let Some(synth) = synths.get_mut(synth_idx) {
+                    synth.send_midi_event(
+                        *channel,
+                        &crate::midi::MidiEventType::NoteOn {
+                            pitch: *pitch,
+                            velocity: *velocity,
+                        },
+                    );
+                }
+            }
+        }
+
+        // Update the tracked state to match.
+        self.active_notes = target_active;
     }
 
     /// Render one block of audio into `left` / `right`, dispatching MIDI
@@ -150,15 +195,33 @@ impl CustomSequencer {
                 }
                 self.playhead_time = 0.0;
                 self.current_event_idx = 0;
+                self.active_notes.clear();
             }
 
             // Dispatch any events whose time has been reached (before rendering).
             while self.current_event_idx < self.events.len() {
                 let ev = &self.events[self.current_event_idx];
                 if ev.time_seconds <= self.playhead_time + EVENT_DISPATCH_TOLERANCE_SECS {
-                    let synth_idx = ev.track_index % synths.len();
+                    let synth_idx = ev.synth_index % synths.len();
                     if let Some(synth) = synths.get_mut(synth_idx) {
                         synth.send_midi_event(ev.channel, &ev.event_type);
+                    }
+                    // Update active_notes tracking.
+                    let key: NoteKey = (
+                        ev.track_index,
+                        ev.channel,
+                        match &ev.event_type {
+                            crate::midi::MidiEventType::NoteOn { pitch, .. } => *pitch,
+                            crate::midi::MidiEventType::NoteOff { pitch } => *pitch,
+                        },
+                    );
+                    match &ev.event_type {
+                        crate::midi::MidiEventType::NoteOn { velocity, .. } => {
+                            self.active_notes.insert(key, (ev.synth_index, *velocity));
+                        }
+                        crate::midi::MidiEventType::NoteOff { .. } => {
+                            self.active_notes.remove(&key);
+                        }
                     }
                     self.current_event_idx += 1;
                 } else {
@@ -243,8 +306,7 @@ impl CustomSequencer {
     /// tracks, round it up to the next full bar boundary, and convert to
     /// seconds.
     ///
-    /// A "bar" is `BEATS_PER_BAR * SNAP_SUBDIVISIONS` minimal grid units,
-    /// i.e. `BEATS_PER_BAR * ticks_per_beat` ticks.
+    /// A "bar" is `BEATS_PER_BAR * ticks_per_beat` ticks.
     fn compute_loop_end(data: &MidiData) -> f64 {
         let last_tick = data
             .tracks

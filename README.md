@@ -68,7 +68,7 @@ On first run a default config file is created at
 
 ```toml
 default_bpm = 120.0          # BPM for new projects
-default_note_beats = 1.0     # Note duration in beats (1.0 = quarter note)
+default_note_beats = 1.0     # Note duration in beats (1.0 = quarter, 0.125 = 32nd)
 soundfont_path = "default.sf2"
 clap_plugin_path = "./plugin.clap"
 ```
