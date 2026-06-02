@@ -11,11 +11,9 @@ clack-host = { git = "https://github.com/prokopyl/clack", features = ["libloadin
 cpal = "0.17.3"
 dirs = "6"
 crossbeam-channel = "0.5.15"
-gdk4-x11 = "0.11"
 glib = "0.22.7"
 gtk4 = { version = "0.11.3", features = ["v4_10"] }
 midly = "0.5.3"
 oxisynth = "0.1.0"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-x11rb = "0.13"

@@ -11,7 +11,7 @@
 
 use crate::clap_audio::buffers::HostAudioBuffers;
 use crate::clap_audio::config::FullAudioConfig;
-use clack_extensions::gui::{GuiApiType, GuiConfiguration, PluginGui, Window};
+use clack_extensions::gui::{GuiApiType, GuiConfiguration, PluginGui};
 use clack_host::prelude::*;
 use std::error::Error;
 use std::sync::Arc;
@@ -57,10 +57,6 @@ pub struct ClapPluginGuiHandle {
     gui_extension: Option<PluginGui>,
     /// Whether the GUI is currently open.
     gui_open: bool,
-    /// X11 container window ID (for embedded mode).  `None` if using floating.
-    container_window: Option<u32>,
-    /// X11 connection kept alive while the container window exists.
-    x11_conn: Option<x11rb::rust_connection::RustConnection>,
     /// Shared callback flag — set by the plugin (via host), polled here.
     callback_flag: Arc<AtomicBool>,
 }
@@ -131,8 +127,6 @@ impl ClapPluginWrapper {
             instance,
             gui_extension,
             gui_open: false,
-            container_window: None,
-            x11_conn: None,
             callback_flag,
         };
 
@@ -360,99 +354,27 @@ impl ClapPluginGuiHandle {
         }
     }
 
-    /// Open the plugin's GUI.
-    ///
-    /// Negotiates the windowing API with the plugin in priority order:
-    ///
-    /// 1. **X11 floating** – simplest for host, works on X11 and XWayland.
-    /// 2. **Wayland floating** – native Wayland (no embedding per CLAP spec).
-    /// 3. **X11 embedded** – host creates an X11 top-level container window.
-    ///
-    /// * `parent_xid` – optional X11 window ID for `set_transient` (X11 only).
-    pub fn open_gui(&mut self, parent_xid: Option<u64>) -> Result<(), Box<dyn Error>> {
+    /// Open the plugin's GUI as a Wayland floating window.
+    pub fn open_gui(&mut self) -> Result<(), Box<dyn Error>> {
         let gui = self
             .gui_extension
             .ok_or("Plugin does not support GUI extension")?;
 
         let mut plugin_handle = self.instance.plugin_handle();
 
-        // Negotiate the API.  Try multiple configurations in priority order.
-        let api_configs = [
-            // Prefer X11 floating (works on X11 and XWayland under Wayland).
-            GuiConfiguration {
-                api_type: GuiApiType::X11,
-                is_floating: true,
-            },
-            // Native Wayland floating (no embedding per CLAP spec).
-            GuiConfiguration {
-                api_type: GuiApiType::WAYLAND,
-                is_floating: true,
-            },
-            // Fallback: X11 embedded — we create a top-level X11 window ourselves.
-            GuiConfiguration {
-                api_type: GuiApiType::X11,
-                is_floating: false,
-            },
-        ];
+        let api_configs = [GuiConfiguration {
+            api_type: GuiApiType::WAYLAND,
+            is_floating: true,
+        }];
 
         let config = api_configs
             .iter()
             .find(|c| gui.is_api_supported(&mut plugin_handle, **c))
-            .ok_or("Plugin does not support any available GUI API")?;
+            .ok_or("Plugin does not support Wayland floating GUI")?;
 
-        let is_floating = config.is_floating;
-        let is_x11 = config.api_type == GuiApiType::X11;
         gui.create(&mut plugin_handle, *config)?;
-
-        if is_floating {
-            // Floating mode: set transient so window stays above DAW.
-            // set_transient only works on X11 (Wayland has no concept of
-            // cross-process window stacking).
-            if is_x11 {
-                if let Some(xid) = parent_xid {
-                    let window = Window::from_x11_handle(xid as std::ffi::c_ulong);
-                    // SAFETY: the GTK window outlives the plugin GUI.
-                    let _ = unsafe { gui.set_transient(&mut plugin_handle, window) };
-                }
-            }
-            gui.suggest_title(&mut plugin_handle, c"CLAP Plugin");
-        } else {
-            // Embedded mode (X11 only): query the plugin's preferred size,
-            // create a top-level X11 window, and pass it as the parent.
-            let size = gui
-                .get_size(&mut plugin_handle)
-                .unwrap_or(clack_extensions::gui::GuiSize {
-                    width: 800,
-                    height: 600,
-                });
-
-            // Drop plugin_handle to release the borrow on self.instance,
-            // so we can call create_x11_container.
-            drop(plugin_handle);
-
-            let (conn, container_xid) = create_x11_container(size.width, size.height)?;
-            self.container_window = Some(container_xid);
-            self.x11_conn = Some(conn);
-
-            // Re-borrow for set_parent.
-            let mut plugin_handle = self.instance.plugin_handle();
-            let parent_window = Window::from_x11_handle(container_xid as std::ffi::c_ulong);
-            // SAFETY: the container window is owned by us and lives until close_gui.
-            unsafe { gui.set_parent(&mut plugin_handle, parent_window)? };
-        }
-
-        // show() may fail for embedded plugins (e.g. nih-plug returns false)
-        // even though the GUI is already visible in our X11 container.
-        // Treat this as non-fatal for non-floating mode.
-        if let Err(e) = gui.show(&mut self.instance.plugin_handle()) {
-            if is_floating {
-                return Err(Box::new(e));
-            }
-            eprintln!(
-                "[CLAP GUI] show() returned error in embedded mode (non-fatal): {:?}",
-                e
-            );
-        }
+        gui.suggest_title(&mut plugin_handle, c"CLAP Plugin");
+        gui.show(&mut self.instance.plugin_handle())?;
 
         self.gui_open = true;
         Ok(())
@@ -468,61 +390,8 @@ impl ClapPluginGuiHandle {
             let _ = gui.hide(&mut plugin_handle);
             gui.destroy(&mut plugin_handle);
         }
-        // Destroy the X11 container window if we created one.
-        if let (Some(conn), Some(win)) = (&self.x11_conn, self.container_window.take()) {
-            use x11rb::connection::Connection as _;
-            use x11rb::protocol::xproto::ConnectionExt as _;
-            let _ = conn.destroy_window(win);
-            let _ = conn.flush();
-        }
-        self.x11_conn = None;
         self.gui_open = false;
     }
-}
-
-/// Create a bare X11 top-level window to serve as the parent container
-/// for an embedded plugin GUI.  Returns `(connection, window_id)`.
-fn create_x11_container(
-    width: u32,
-    height: u32,
-) -> Result<(x11rb::rust_connection::RustConnection, u32), Box<dyn Error>> {
-    use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::*;
-    use x11rb::wrapper::ConnectionExt as _;
-
-    let (conn, screen_num) = x11rb::connect(None)?;
-    let screen = &conn.setup().roots[screen_num];
-
-    let win_id = conn.generate_id()?;
-    conn.create_window(
-        x11rb::COPY_DEPTH_FROM_PARENT,
-        win_id,
-        screen.root,
-        100, // x
-        100, // y
-        width as u16,
-        height as u16,
-        0, // border
-        WindowClass::INPUT_OUTPUT,
-        0, // visual (copy from parent)
-        &CreateWindowAux::new()
-            .event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::EXPOSURE)
-            .background_pixel(screen.black_pixel),
-    )?;
-
-    // Set the window title.
-    conn.change_property8(
-        PropMode::REPLACE,
-        win_id,
-        AtomEnum::WM_NAME,
-        AtomEnum::STRING,
-        b"CLAP Plugin",
-    )?;
-
-    conn.map_window(win_id)?;
-    conn.flush()?;
-
-    Ok((conn, win_id))
 }
 
 impl Drop for ClapPluginGuiHandle {

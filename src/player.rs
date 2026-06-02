@@ -295,12 +295,9 @@ impl Player {
     }
 
     /// Open the CLAP plugin GUI for the given track.
-    ///
-    /// `parent_xid` is the X11 window ID of the GTK window (for transient
-    /// linkage).  Pass `None` on Wayland or if unavailable.
-    pub fn open_plugin_gui(&mut self, track_index: usize, parent_xid: Option<u64>) {
+    pub fn open_plugin_gui(&mut self, track_index: usize) {
         if let Some(Some(gui)) = self.clap_gui_handles.get_mut(track_index) {
-            if let Err(e) = gui.open_gui(parent_xid) {
+            if let Err(e) = gui.open_gui() {
                 eprintln!("Failed to open plugin GUI: {}", e);
             }
         }

@@ -18,16 +18,6 @@ use crate::piano_roll::PianoRollWidget;
 use crate::piano_roll::types::EditMode;
 use crate::player::Player;
 
-/// Try to get the X11 window ID from a GTK4 window.
-///
-/// Returns `None` on Wayland or if the X11 backend is not in use.
-fn get_x11_xid(window: &ApplicationWindow) -> Option<u64> {
-    use gtk::prelude::NativeExt;
-    let surface = window.native()?.surface()?;
-    let x11_surface = surface.downcast_ref::<gdk4_x11::X11Surface>()?;
-    Some(x11_surface.xid() as u64)
-}
-
 pub fn build_ui(app: &gtk::Application) {
     // Load user configuration
     let config = AppConfig::load();
@@ -426,7 +416,6 @@ pub fn build_ui(app: &gtk::Application) {
 
     // Plugin GUI button: toggle the CLAP plugin's floating window.
     let player_gui = player.clone();
-    let window_for_gui = window.clone();
     let track_dropdown_gui = track_dropdown.clone();
     let piano_roll_gui = piano_roll.clone();
     plugin_gui_btn.connect_clicked(move |_btn| {
@@ -436,8 +425,7 @@ pub fn build_ui(app: &gtk::Application) {
             if p.is_plugin_gui_open(synth_index) {
                 p.close_plugin_gui(synth_index);
             } else {
-                let xid = get_x11_xid(&window_for_gui);
-                p.open_plugin_gui(synth_index, xid);
+                p.open_plugin_gui(synth_index);
             }
         }
     });

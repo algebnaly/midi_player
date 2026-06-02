@@ -61,6 +61,21 @@ src/
 cargo build --release
 ```
 
+On Windows, set `GtkRoot` to your GTK4 release directory, then make
+`pkg-config`, the GTK DLLs, and the MSVC import libraries visible before
+building:
+
+```powershell
+$GtkRoot = "C:\gtk-build\gtk\x64\release"
+$env:Path = "$GtkRoot\bin;" + $env:Path
+$env:PKG_CONFIG_PATH = "$GtkRoot\lib\pkgconfig"
+$env:RUSTFLAGS = "-L native=$GtkRoot\lib"
+cargo build --release
+```
+
+If GTK is installed somewhere else, change only `$GtkRoot`.
+
+
 ## Configuration
 
 On first run a default config file is created at
