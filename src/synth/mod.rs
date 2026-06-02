@@ -105,6 +105,7 @@ impl TrackSynth {
     }
 
     /// Update the transport playing state.  Only relevant for CLAP plugins.
+    #[allow(dead_code)]
     pub fn set_playing(&mut self, playing: bool) {
         if let TrackSynth::ClapPlugin(c) = self {
             c.set_playing(playing);

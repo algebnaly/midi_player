@@ -52,6 +52,7 @@ pub struct MidiPlayerHostShared {
 
 impl MidiPlayerHostShared {
     /// Create a new shared host state instance.
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             callback_requested: Arc::new(AtomicBool::new(false)),
@@ -69,6 +70,7 @@ impl MidiPlayerHostShared {
     }
 
     /// Returns a cloneable handle to the callback flag.
+    #[allow(dead_code)]
     pub fn callback_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.callback_requested)
     }

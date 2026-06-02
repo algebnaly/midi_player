@@ -287,6 +287,7 @@ impl Player {
     // ------------------------------------------------------------------
 
     /// Whether the given track has a CLAP plugin that supports GUI.
+    #[allow(dead_code)]
     pub fn track_supports_gui(&self, track_index: usize) -> bool {
         self.clap_gui_handles
             .get(track_index)

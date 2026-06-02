@@ -1,0 +1,154 @@
+//! Constants, enumerations, and shared types for the piano roll.
+
+use crate::midi::Note;
+use gtk::gdk;
+use gtk4 as gtk;
+
+// ── Layout constants ───────────────────────────────────────────────────
+
+pub const KEY_WIDTH: f64 = 70.0;
+pub const BEATS_PER_BAR: u64 = 4;
+/// Snap resolution: 1/8 beat (32nd notes).
+pub const SNAP_SUBDIVISIONS: u64 = 8;
+
+// ── Interaction thresholds ─────────────────────────────────────────────
+
+/// Pixels from the playhead line that still count as a "click on playhead".
+pub const PLAYHEAD_HIT_RADIUS: f64 = 10.0;
+/// Pixels from the right edge of a note that trigger resize mode.
+pub const NOTE_EDGE_THRESHOLD: f64 = 8.0;
+/// Height (px) of the top region where a click always drags the playhead.
+pub const TOP_REGION_HEIGHT: f64 = 20.0;
+/// Minimum rendered width of a note so it stays visible at high zoom-out.
+pub const MIN_NOTE_WIDTH_PX: f64 = 2.0;
+
+// ── Snap helpers ───────────────────────────────────────────────────────
+
+/// Snap a tick to the nearest subdivision grid point.
+pub fn snap_tick(tick: u64, ticks_per_beat: u16) -> u64 {
+    let grid = ticks_per_beat as u64 / SNAP_SUBDIVISIONS;
+    if grid == 0 {
+        return tick;
+    }
+    ((tick + grid / 2) / grid) * grid
+}
+
+/// Snap a tick down to the nearest beat boundary.
+pub fn snap_tick_to_beat(tick: u64, ticks_per_beat: u16) -> u64 {
+    let align_grid = ticks_per_beat as u64;
+    tick / align_grid * align_grid
+}
+
+// ── Drag mode ──────────────────────────────────────────────────────────
+
+#[derive(Default, Debug, PartialEq, Copy, Clone)]
+pub enum DragMode {
+    #[default]
+    None,
+    MoveNote,
+    ResizeDuration,
+}
+
+// ── Drag state ─────────────────────────────────────────────────────────
+
+/// All mutable state associated with an in-progress drag gesture.
+#[derive(Default, Debug)]
+pub struct DragState {
+    pub mode: DragMode,
+    pub is_dragging_playhead: bool,
+    pub start_x: f64,
+    /// Offset in ticks from note start_tick to where the click landed.
+    pub click_offset_ticks: f64,
+    /// Last dx from GestureDrag (for scroll-during-drag re-sync).
+    pub last_dx: f64,
+    /// Last dy from GestureDrag.
+    pub last_dy: f64,
+    /// Snapshot of the note at drag-begin, used as a reference for moves.
+    pub orig_note: Option<Note>,
+}
+
+// ── Hit-test result ────────────────────────────────────────────────────
+
+/// Result of a spatial query: which note was hit and how.
+pub struct HitTestResult {
+    pub note_index: usize,
+    pub drag_mode: DragMode,
+    pub synth_index: usize,
+}
+
+// ── Color theme ────────────────────────────────────────────────────────
+
+/// Named color palette for the entire piano-roll widget.
+pub struct Theme {
+    pub background: gdk::RGBA,
+    pub grid_line: gdk::RGBA,
+    pub bar_line: gdk::RGBA,
+    pub bar_line_width: f32,
+    pub beat_line: gdk::RGBA,
+    pub beat_line_width: f32,
+    pub sub_beat_line: gdk::RGBA,
+    pub sub_beat_line_width: f32,
+    pub note_active: gdk::RGBA,
+    pub note_selected: gdk::RGBA,
+    pub note_inactive: gdk::RGBA,
+    pub note_border_active: gdk::RGBA,
+    pub note_border_inactive: gdk::RGBA,
+    pub playhead: gdk::RGBA,
+    pub white_key: gdk::RGBA,
+    pub black_key: gdk::RGBA,
+    pub active_white_key: gdk::RGBA,
+    pub active_black_key: gdk::RGBA,
+    pub key_border: gdk::RGBA,
+    pub key_text: gdk::RGBA,
+}
+
+/// Create the default dark theme matching the original hard-coded colors.
+pub fn default_theme() -> Theme {
+    Theme {
+        background: gdk::RGBA::new(0.1, 0.1, 0.1, 1.0),
+        grid_line: gdk::RGBA::new(0.2, 0.2, 0.2, 1.0),
+        bar_line: gdk::RGBA::new(0.5, 0.5, 0.5, 0.8),
+        bar_line_width: 2.0,
+        beat_line: gdk::RGBA::new(0.35, 0.35, 0.35, 0.6),
+        beat_line_width: 1.0,
+        sub_beat_line: gdk::RGBA::new(0.2, 0.2, 0.2, 0.4),
+        sub_beat_line_width: 1.0,
+        note_active: gdk::RGBA::new(0.2, 0.6, 1.0, 1.0),
+        note_selected: gdk::RGBA::new(1.0, 0.8, 0.2, 1.0),
+        note_inactive: gdk::RGBA::new(0.5, 0.5, 0.5, 0.4),
+        note_border_active: gdk::RGBA::new(1.0, 1.0, 1.0, 0.5),
+        note_border_inactive: gdk::RGBA::new(1.0, 1.0, 1.0, 0.1),
+        playhead: gdk::RGBA::new(1.0, 0.2, 0.2, 1.0),
+        white_key: gdk::RGBA::new(0.9, 0.9, 0.9, 1.0),
+        black_key: gdk::RGBA::new(0.05, 0.05, 0.05, 1.0),
+        active_white_key: gdk::RGBA::new(1.0, 0.8, 0.2, 1.0),
+        active_black_key: gdk::RGBA::new(0.8, 0.6, 0.1, 1.0),
+        key_border: gdk::RGBA::new(0.0, 0.0, 0.0, 1.0),
+        key_text: gdk::RGBA::new(0.2, 0.2, 0.2, 1.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snap_tick_rounds_to_nearest_grid() {
+        // 480 ticks/beat, subdivision=8 → grid=60
+        assert_eq!(snap_tick(0, 480), 0);
+        assert_eq!(snap_tick(29, 480), 0); // rounds down
+        assert_eq!(snap_tick(30, 480), 60); // rounds up
+        assert_eq!(snap_tick(60, 480), 60);
+        assert_eq!(snap_tick(89, 480), 60);
+        assert_eq!(snap_tick(90, 480), 120);
+    }
+
+    #[test]
+    fn snap_tick_to_beat_floors() {
+        assert_eq!(snap_tick_to_beat(0, 480), 0);
+        assert_eq!(snap_tick_to_beat(479, 480), 0);
+        assert_eq!(snap_tick_to_beat(480, 480), 480);
+        assert_eq!(snap_tick_to_beat(960, 480), 960);
+        assert_eq!(snap_tick_to_beat(1000, 480), 960);
+    }
+}

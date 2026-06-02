@@ -193,6 +193,7 @@ impl ClapPluginWrapper {
     }
 
     /// Update the transport playing state reported to the plugin.
+    #[allow(dead_code)]
     pub fn set_playing(&mut self, playing: bool) {
         self.playing = playing;
     }
@@ -339,6 +340,7 @@ impl ClapPluginWrapper {
 
 impl ClapPluginGuiHandle {
     /// Whether this plugin supports the CLAP GUI extension.
+    #[allow(dead_code)]
     pub fn supports_gui(&self) -> bool {
         self.gui_extension.is_some()
     }

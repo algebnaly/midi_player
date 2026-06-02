@@ -6,7 +6,7 @@
 //! interactions to the [`Player`] backend.
 
 use gtk::prelude::*;
-use gtk::{ApplicationWindow, Box, Button, DropDown, HeaderBar, StringList};
+use gtk::{ApplicationWindow, Box, Button, DropDown, HeaderBar, StringList, ToggleButton};
 use gtk4 as gtk;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -33,7 +33,7 @@ pub fn build_ui(app: &gtk::Application) {
 
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("Rust MIDI Player & Editor")
+        .title("MIDI Player")
         .default_width(1024)
         .default_height(768)
         .build();
@@ -59,10 +59,18 @@ pub fn build_ui(app: &gtk::Application) {
 
     let plugin_gui_btn = Button::with_label("Plugin GUI");
 
+    let typing_kb_btn = ToggleButton::with_label("⌨ Typing Keyboard");
+    typing_kb_btn.set_tooltip_text(Some(
+        "Play notes with your keyboard (white keys, 4 octaves):\n\
+         1-7 → C5–B5  |  Q W E R T Y U → C4–B4\n\
+         A S D F G H J → C3–B3  |  Z X C V B N M → C2–B2",
+    ));
+
     header_bar.pack_start(&open_btn);
     header_bar.pack_start(&save_btn);
     header_bar.pack_start(&track_dropdown);
     header_bar.pack_start(&plugin_gui_btn);
+    header_bar.pack_start(&typing_kb_btn);
     header_bar.pack_start(&bpm_box);
 
     header_bar.pack_end(&rewind_btn);
@@ -75,6 +83,16 @@ pub fn build_ui(app: &gtk::Application) {
     let piano_roll = PianoRollWidget::new();
     piano_roll.set_default_note_beats(config.default_note_beats);
     vbox.append(&piano_roll);
+
+    // Wire typing keyboard toggle
+    let pr_typing = piano_roll.clone();
+    typing_kb_btn.connect_toggled(move |btn| {
+        pr_typing.set_typing_keyboard_enabled(btn.is_active());
+        // When enabling, grab focus on the piano roll so it receives key events.
+        if btn.is_active() {
+            pr_typing.grab_focus();
+        }
+    });
 
     let player = Rc::new(RefCell::new(
         match Player::new(&config.soundfont_path, &config.clap_plugin_path) {
