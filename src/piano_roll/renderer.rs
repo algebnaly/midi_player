@@ -1,11 +1,12 @@
 //! Rendering functions for the piano roll grid, notes, and playhead.
 
-use super::types::{Theme, BEATS_PER_BAR, KEY_WIDTH, SNAP_SUBDIVISIONS};
+use super::types::{BEATS_PER_BAR, KEY_WIDTH, SNAP_SUBDIVISIONS, SelectionRect, Theme};
 use super::viewport::Viewport;
 use crate::midi::MidiData;
 use gtk::graphene;
 use gtk::prelude::*;
 use gtk4 as gtk;
+use std::collections::HashSet;
 
 /// Render horizontal pitch grid lines across the roll area.
 pub fn render_pitch_lines(snapshot: &gtk::Snapshot, vp: &Viewport, theme: &Theme) {
@@ -26,12 +27,7 @@ pub fn render_pitch_lines(snapshot: &gtk::Snapshot, vp: &Viewport, theme: &Theme
 }
 
 /// Render vertical beat / bar / subdivision grid lines.
-pub fn render_beat_grid(
-    snapshot: &gtk::Snapshot,
-    vp: &Viewport,
-    midi: &MidiData,
-    theme: &Theme,
-) {
+pub fn render_beat_grid(snapshot: &gtk::Snapshot, vp: &Viewport, midi: &MidiData, theme: &Theme) {
     let kw = KEY_WIDTH as f32;
     let height = vp.height as f32;
     let width = vp.width as f32;
@@ -74,7 +70,7 @@ pub fn render_notes(
     vp: &Viewport,
     midi: &MidiData,
     active_track: usize,
-    selected_note: Option<usize>,
+    selected_notes: &HashSet<usize>,
     theme: &Theme,
 ) {
     let kw = KEY_WIDTH as f32;
@@ -91,7 +87,7 @@ pub fn render_notes(
             if x + w > kw && x < width && y + h > 0.0 && y < height {
                 // Fill
                 let note_color = if is_active {
-                    if selected_note == Some(n_idx) {
+                    if selected_notes.contains(&n_idx) {
                         &theme.note_selected
                     } else {
                         &theme.note_active
@@ -128,5 +124,47 @@ pub fn render_playhead(snapshot: &gtk::Snapshot, vp: &Viewport, time: f64, theme
             &theme.playhead,
             &graphene::Rect::new(p_x - 1.0, 0.0, 3.0, height),
         );
+    }
+}
+
+/// Render the rubber-band selection rectangle.
+pub fn render_selection_rect(
+    snapshot: &gtk::Snapshot,
+    vp: &Viewport,
+    sel: &SelectionRect,
+    theme: &Theme,
+) {
+    let kw = KEY_WIDTH as f32;
+
+    // Convert absolute X to screen X
+    let screen_x0 = (sel.abs_x0 - vp.scroll_x + KEY_WIDTH) as f32;
+    let screen_x1 = (sel.abs_x1 - vp.scroll_x + KEY_WIDTH) as f32;
+    let (sx0, sx1) = if screen_x0 < screen_x1 {
+        (screen_x0, screen_x1)
+    } else {
+        (screen_x1, screen_x0)
+    };
+
+    // Convert pitch to screen Y
+    let y_top = vp.pitch_to_y(sel.pitch_hi) as f32 - vp.zoom_y as f32;
+    let y_bot = vp.pitch_to_y(sel.pitch_lo) as f32;
+
+    let rx = sx0.max(kw);
+    let ry = y_top;
+    let rw = sx1 - sx0;
+    let rh = y_bot - y_top;
+
+    if rw > 0.0 && rh > 0.0 {
+        // Fill
+        snapshot.append_color(
+            &theme.selection_rect_fill,
+            &graphene::Rect::new(rx, ry, rw, rh),
+        );
+        // Border (4 edges)
+        let bc = &theme.selection_rect_border;
+        snapshot.append_color(bc, &graphene::Rect::new(rx, ry, rw, 1.0));
+        snapshot.append_color(bc, &graphene::Rect::new(rx, ry + rh - 1.0, rw, 1.0));
+        snapshot.append_color(bc, &graphene::Rect::new(rx, ry, 1.0, rh));
+        snapshot.append_color(bc, &graphene::Rect::new(rx + rw - 1.0, ry, 1.0, rh));
     }
 }

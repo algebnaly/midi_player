@@ -32,9 +32,13 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Returns the config directory: `~/.config/midi_player/`.
+    /// Returns the config directory.
+    ///
+    /// * Linux: `$XDG_CONFIG_HOME/midi_player` or `~/.config/midi_player`
+    /// * macOS: `~/Library/Application Support/midi_player`
+    /// * Windows: `%APPDATA%\midi_player`
     fn config_dir() -> Option<PathBuf> {
-        dirs_fallback().map(|base| base.join("midi_player"))
+        dirs::config_dir().map(|base| base.join("midi_player"))
     }
 
     /// Returns the full path to the config file.
@@ -101,19 +105,4 @@ impl AppConfig {
     pub fn default_note_ticks(&self, ticks_per_beat: u16) -> u64 {
         ((self.default_note_beats * ticks_per_beat as f64).round() as u64).max(1)
     }
-}
-
-/// Get the XDG config home (or fallback to `~/.config`).
-fn dirs_fallback() -> Option<PathBuf> {
-    // Check $XDG_CONFIG_HOME first
-    if let Ok(val) = std::env::var("XDG_CONFIG_HOME") {
-        let p = PathBuf::from(val);
-        if p.is_absolute() {
-            return Some(p);
-        }
-    }
-    // Fallback: ~/.config
-    std::env::var("HOME")
-        .ok()
-        .map(|h| PathBuf::from(h).join(".config"))
 }

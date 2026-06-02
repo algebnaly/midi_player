@@ -16,7 +16,7 @@
 mod input;
 mod keyboard;
 mod renderer;
-mod types;
+pub mod types;
 mod viewport;
 
 use crate::midi::MidiData;
@@ -27,7 +27,7 @@ use gtk4 as gtk;
 use std::cell::RefCell;
 use std::collections::HashSet;
 
-use types::{DragState, KEY_WIDTH};
+use types::{DragState, EditMode, KEY_WIDTH, SelectionRect};
 use viewport::Viewport;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -39,10 +39,11 @@ mod imp {
 
     #[derive(Default)]
     pub struct PianoRollWidget {
-        // ── Data ──────────────────────────────────────────────────
+        // ── Data ──────────────────────────────────────────────
         pub data: RefCell<Option<MidiData>>,
         pub active_track: RefCell<usize>,
-        pub selected_note: RefCell<Option<usize>>,
+        /// Multi-note selection (indices into the active track's note list).
+        pub selected_notes: RefCell<HashSet<usize>>,
 
         // ── Viewport ──────────────────────────────────────────────
         pub playhead_time: RefCell<f64>,
@@ -52,8 +53,13 @@ mod imp {
         pub scroll_y: RefCell<f64>,
 
         // ── Interaction ───────────────────────────────────────────
+        pub edit_mode: RefCell<EditMode>,
         pub drag_state: RefCell<DragState>,
         pub preview_active_pitch: RefCell<Option<u8>>,
+        pub selection_rect: RefCell<Option<SelectionRect>>,
+        /// Last known cursor position in widget coords (updated by motion + drag).
+        pub cursor_x: RefCell<f64>,
+        pub cursor_y: RefCell<f64>,
 
         // ── Typing keyboard ───────────────────────────────────────
         /// When true, QWERTY keys trigger note-on/off.
@@ -74,6 +80,8 @@ mod imp {
         pub preview_note_on_callback: RefCell<Option<Box<dyn Fn(usize, u8, u8)>>>,
         #[allow(clippy::type_complexity)]
         pub preview_note_off_callback: RefCell<Option<Box<dyn Fn(usize, u8)>>>,
+        #[allow(clippy::type_complexity)]
+        pub status_callback: RefCell<Option<Box<dyn Fn(&str)>>>,
     }
 
     #[glib::object_subclass]
@@ -129,12 +137,17 @@ mod imp {
                     &vp,
                     midi,
                     *self.active_track.borrow(),
-                    *self.selected_note.borrow(),
+                    &*self.selected_notes.borrow(),
                     &theme,
                 );
             }
 
             renderer::render_playhead(snapshot, &vp, *self.playhead_time.borrow(), &theme);
+
+            // Render selection rectangle overlay (if active)
+            if let Some(sel) = &*self.selection_rect.borrow() {
+                renderer::render_selection_rect(snapshot, &vp, sel, &theme);
+            }
 
             snapshot.pop(); // end clip
 
@@ -188,6 +201,10 @@ impl PianoRollWidget {
         *self.imp().preview_note_off_callback.borrow_mut() = Some(Box::new(f));
     }
 
+    pub fn connect_status<F: Fn(&str) + 'static>(&self, f: F) {
+        *self.imp().status_callback.borrow_mut() = Some(Box::new(f));
+    }
+
     // ── Viewport helpers ──────────────────────────────────────────
 
     /// Build a [`Viewport`] snapshot from the current widget state.
@@ -212,7 +229,7 @@ impl PianoRollWidget {
     pub fn set_data(&self, midi: MidiData) {
         *self.imp().data.borrow_mut() = Some(midi);
         *self.imp().active_track.borrow_mut() = 0;
-        *self.imp().selected_note.borrow_mut() = None;
+        self.imp().selected_notes.borrow_mut().clear();
         self.queue_draw();
     }
 
@@ -270,7 +287,7 @@ impl PianoRollWidget {
 
     pub fn set_active_track(&self, track_idx: usize) {
         *self.imp().active_track.borrow_mut() = track_idx;
-        *self.imp().selected_note.borrow_mut() = None;
+        self.imp().selected_notes.borrow_mut().clear();
         self.queue_draw();
     }
 
@@ -289,6 +306,35 @@ impl PianoRollWidget {
     /// Set the default note duration in beats (from user config).
     pub fn set_default_note_beats(&self, beats: f64) {
         *self.imp().default_note_beats.borrow_mut() = beats.max(0.0625);
+    }
+
+    // ── Edit mode ──────────────────────────────────────────────
+
+    pub fn set_edit_mode(&self, mode: EditMode) {
+        *self.imp().edit_mode.borrow_mut() = mode;
+        // Clear selection rect when switching modes
+        *self.imp().selection_rect.borrow_mut() = None;
+        self.update_status();
+        self.queue_draw();
+    }
+
+    pub fn get_edit_mode(&self) -> EditMode {
+        *self.imp().edit_mode.borrow()
+    }
+
+    /// Push a status update through the callback.
+    pub(crate) fn update_status(&self) {
+        let imp = self.imp();
+        let mode = *imp.edit_mode.borrow();
+        let sel_count = imp.selected_notes.borrow().len();
+        let msg = if sel_count > 0 {
+            format!("[{}] {} note(s) selected", mode.label(), sel_count)
+        } else {
+            format!("[{}]", mode.label())
+        };
+        if let Some(cb) = &*imp.status_callback.borrow() {
+            cb(&msg);
+        }
     }
 
     // ── Typing keyboard ──────────────────────────────────────────
@@ -310,7 +356,12 @@ impl PianoRollWidget {
     /// Release all currently held typing-keyboard notes.
     fn release_all_typing_keys(&self) {
         let imp = self.imp();
-        let pitches: Vec<u8> = imp.typing_pressed_pitches.borrow().iter().copied().collect();
+        let pitches: Vec<u8> = imp
+            .typing_pressed_pitches
+            .borrow()
+            .iter()
+            .copied()
+            .collect();
         let synth_index = self.active_synth_index();
         for pitch in pitches {
             if let Some(cb) = &*imp.preview_note_off_callback.borrow() {

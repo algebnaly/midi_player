@@ -4,8 +4,8 @@
 //! dimensions.  Every tick↔pixel and pitch↔pixel conversion lives here so that
 //! renderers and input handlers share a single source of truth.
 
-use crate::midi::Note;
 use super::types::{KEY_WIDTH, MIN_NOTE_WIDTH_PX};
+use crate::midi::Note;
 
 /// Immutable snapshot of the current viewport parameters.
 #[derive(Debug, Clone)]

@@ -12,6 +12,7 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk4 as gtk;
+use std::collections::HashMap;
 
 // ────────────────────────────────────────────────────────────────────────
 // Typing-keyboard key → MIDI pitch mapping
@@ -132,8 +133,11 @@ pub fn setup_controllers(widget: &super::PianoRollWidget) {
     // Left-button drag: playhead, note create/select/move/resize
     let drag = gtk::GestureDrag::new();
     let w = widget.clone();
-    drag.connect_drag_begin(move |_, start_x, start_y| {
-        handle_drag_begin(&w, start_x, start_y);
+    drag.connect_drag_begin(move |gesture, start_x, start_y| {
+        let shift = gesture
+            .current_event_state()
+            .contains(gdk::ModifierType::SHIFT_MASK);
+        handle_drag_begin(&w, start_x, start_y, shift);
     });
     let w = widget.clone();
     drag.connect_drag_update(move |_, dx, dy| {
@@ -145,8 +149,7 @@ pub fn setup_controllers(widget: &super::PianoRollWidget) {
     });
 
     // Scroll: pan & zoom
-    let scroll =
-        gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+    let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
     let w = widget.clone();
     scroll.connect_scroll(move |controller, dx, dy| handle_scroll(&w, controller, dx, dy));
 
@@ -175,12 +178,15 @@ pub fn setup_controllers(widget: &super::PianoRollWidget) {
 // Event handlers
 // ────────────────────────────────────────────────────────────────────────
 
-/// Right-click: delete the note under the cursor.
+/// Right-click: delete the note under the cursor (Draw mode only).
 fn handle_right_click(widget: &super::PianoRollWidget, x: f64, y: f64) {
     if x < KEY_WIDTH {
         return;
     }
     let imp = widget.imp();
+    if *imp.edit_mode.borrow() == EditMode::Select {
+        return;
+    }
     widget.grab_focus();
 
     let zx = *imp.zoom_x.borrow();
@@ -194,7 +200,17 @@ fn handle_right_click(widget: &super::PianoRollWidget, x: f64, y: f64) {
     if let Some(midi) = &mut *imp.data.borrow_mut() {
         if let Some(hit) = hit_test_note(midi, act_track, zx, abs_x, target_pitch) {
             midi.tracks[act_track].notes.remove(hit.note_index);
-            *imp.selected_note.borrow_mut() = None;
+            let mut new_sel = std::collections::HashSet::new();
+            for &idx in imp.selected_notes.borrow().iter() {
+                if idx == hit.note_index {
+                    continue;
+                } else if idx > hit.note_index {
+                    new_sel.insert(idx - 1);
+                } else {
+                    new_sel.insert(idx);
+                }
+            }
+            *imp.selected_notes.borrow_mut() = new_sel;
             widget.queue_draw();
             changed = true;
         }
@@ -203,25 +219,31 @@ fn handle_right_click(widget: &super::PianoRollWidget, x: f64, y: f64) {
         if let Some(cb) = &*imp.data_changed_callback.borrow() {
             cb();
         }
+        widget.update_status();
     }
 }
 
-/// Left-button drag begin: start playhead drag, select existing note, or
-/// create a new note.
-fn handle_drag_begin(widget: &super::PianoRollWidget, start_x: f64, start_y: f64) {
+/// Left-button drag begin.
+fn handle_drag_begin(
+    widget: &super::PianoRollWidget,
+    start_x: f64,
+    start_y: f64,
+    shift_held: bool,
+) {
     if start_x < KEY_WIDTH {
         return;
     }
     let imp = widget.imp();
     widget.grab_focus();
 
-    // Reset drag state
     {
         let mut ds = imp.drag_state.borrow_mut();
         ds.is_dragging_playhead = false;
         ds.orig_note = None;
+        ds.orig_notes.clear();
         ds.mode = DragMode::None;
         ds.start_x = start_x - KEY_WIDTH;
+        ds.start_y = start_y;
     }
 
     let p_time = *imp.playhead_time.borrow();
@@ -230,8 +252,7 @@ fn handle_drag_begin(widget: &super::PianoRollWidget, start_x: f64, start_y: f64
     let sx_adj = start_x - KEY_WIDTH;
     let p_x = p_time * zx - scroll_x;
     let abs_x = sx_adj + scroll_x;
-
-    // ── Playhead drag ──────────────────────────────────────────────
+    let edit_mode = *imp.edit_mode.borrow();
 
     if (sx_adj - p_x).abs() < PLAYHEAD_HIT_RADIUS || start_y < TOP_REGION_HEIGHT {
         imp.drag_state.borrow_mut().is_dragging_playhead = true;
@@ -244,13 +265,81 @@ fn handle_drag_begin(widget: &super::PianoRollWidget, start_x: f64, start_y: f64
         return;
     }
 
-    // ── Note selection / creation ──────────────────────────────────
-
     let act_track = *imp.active_track.borrow();
     let vp = widget.build_viewport();
     let target_pitch = vp.y_to_pitch(start_y);
+    imp.drag_state.borrow_mut().start_pitch = target_pitch;
 
-    // Try to hit an existing note
+    match edit_mode {
+        EditMode::Select => {
+            handle_drag_begin_select(widget, abs_x, target_pitch, act_track, shift_held)
+        }
+        EditMode::Draw => handle_drag_begin_draw(widget, abs_x, target_pitch, act_track),
+    }
+}
+
+fn handle_drag_begin_select(
+    widget: &super::PianoRollWidget,
+    abs_x: f64,
+    target_pitch: u8,
+    act_track: usize,
+    shift_held: bool,
+) {
+    let imp = widget.imp();
+    let zx = *imp.zoom_x.borrow();
+    let tps = Viewport::ticks_per_sec(
+        imp.data.borrow().as_ref().map_or(480, |m| m.ticks_per_beat),
+        imp.data.borrow().as_ref().map_or(120.0, |m| m.get_bpm()),
+    );
+    imp.drag_state.borrow_mut().start_cursor_tick = (abs_x / zx) * tps;
+
+    if let Some(midi) = &*imp.data.borrow() {
+        if let Some(hit) = hit_test_note(midi, act_track, zx, abs_x, target_pitch) {
+            if imp.selected_notes.borrow().contains(&hit.note_index) {
+                let mut orig_notes = HashMap::new();
+                for &idx in imp.selected_notes.borrow().iter() {
+                    if idx < midi.tracks[act_track].notes.len() {
+                        orig_notes.insert(idx, midi.tracks[act_track].notes[idx].clone());
+                    }
+                }
+                {
+                    let mut ds = imp.drag_state.borrow_mut();
+                    ds.mode = DragMode::BulkMove;
+                    ds.orig_notes = orig_notes;
+                }
+                widget.set_cursor_from_name(Some("grabbing"));
+                return;
+            }
+        }
+    }
+
+    *imp.selection_rect.borrow_mut() = Some(SelectionRect {
+        abs_x0: abs_x,
+        abs_x1: abs_x,
+        pitch_lo: target_pitch,
+        pitch_hi: target_pitch,
+    });
+    imp.drag_state.borrow_mut().mode = DragMode::BoxSelect;
+    // Store the base selection for Shift+append
+    if shift_held {
+        imp.drag_state.borrow_mut().base_selection = imp.selected_notes.borrow().clone();
+    } else {
+        imp.drag_state.borrow_mut().base_selection.clear();
+        imp.selected_notes.borrow_mut().clear();
+    }
+    widget.set_cursor_from_name(Some("crosshair"));
+    widget.queue_draw();
+}
+
+fn handle_drag_begin_draw(
+    widget: &super::PianoRollWidget,
+    abs_x: f64,
+    target_pitch: u8,
+    act_track: usize,
+) {
+    let imp = widget.imp();
+    let zx = *imp.zoom_x.borrow();
+
     let mut found: Option<(HitTestResult, Note)> = None;
     let mut tps = 1.0;
     if let Some(midi) = &*imp.data.borrow() {
@@ -262,14 +351,16 @@ fn handle_drag_begin(widget: &super::PianoRollWidget, start_x: f64, start_y: f64
     }
 
     if let Some((hit, note)) = found {
-        // ── Select existing note ───────────────────────────────────
-        *imp.selected_note.borrow_mut() = Some(hit.note_index);
+        {
+            let mut sel = imp.selected_notes.borrow_mut();
+            sel.clear();
+            sel.insert(hit.note_index);
+        }
         {
             let mut ds = imp.drag_state.borrow_mut();
             ds.orig_note = Some(note.clone());
             ds.mode = hit.drag_mode;
-            let click_tick = (abs_x / zx) * tps;
-            ds.click_offset_ticks = click_tick - note.start_tick as f64;
+            ds.start_cursor_tick = (abs_x / zx) * tps;
         }
         if let Some(cb) = &*imp.preview_note_on_callback.borrow() {
             cb(hit.synth_index, note.pitch, note.velocity);
@@ -282,16 +373,14 @@ fn handle_drag_begin(widget: &super::PianoRollWidget, start_x: f64, start_y: f64
         });
         widget.queue_draw();
     } else {
-        // ── Create new note ────────────────────────────────────────
         let mut synth_index = act_track;
         if let Some(midi) = &mut *imp.data.borrow_mut() {
             if act_track < midi.tracks.len() {
                 synth_index = midi.tracks[act_track].synth_index;
                 let raw_tick = ((abs_x / zx) * tps) as u64;
                 let start_tick = snap_tick_to_beat(raw_tick, midi.ticks_per_beat);
-                let note_len = (*imp.default_note_beats.borrow()
-                    * midi.ticks_per_beat as f64)
-                    .round() as u64;
+                let note_len =
+                    (*imp.default_note_beats.borrow() * midi.ticks_per_beat as f64).round() as u64;
                 let end_tick = start_tick + note_len.max(1);
                 let new_note = Note {
                     pitch: target_pitch,
@@ -302,33 +391,37 @@ fn handle_drag_begin(widget: &super::PianoRollWidget, start_x: f64, start_y: f64
                 };
                 midi.tracks[act_track].notes.push(new_note.clone());
                 let new_idx = midi.tracks[act_track].notes.len() - 1;
-                *imp.selected_note.borrow_mut() = Some(new_idx);
+                {
+                    let mut sel = imp.selected_notes.borrow_mut();
+                    sel.clear();
+                    sel.insert(new_idx);
+                }
                 {
                     let mut ds = imp.drag_state.borrow_mut();
                     ds.orig_note = Some(new_note);
                     ds.mode = DragMode::MoveNote;
+                    ds.start_cursor_tick = (abs_x / zx) * tps;
                 }
                 *imp.preview_active_pitch.borrow_mut() = Some(target_pitch);
                 widget.queue_draw();
             }
         }
-        // Fire data_changed FIRST so hot_swap (→ all_notes_off) runs
-        // before the preview note is sent.
         if let Some(cb) = &*imp.data_changed_callback.borrow() {
             cb();
         }
-        // Now send preview NoteOn — after hot_swap is done.
         if let Some(cb) = &*imp.preview_note_on_callback.borrow() {
             cb(synth_index, target_pitch, 100);
         }
     }
+    widget.update_status();
 }
 
 /// Shared drag-position update logic, called from both `drag_update` and
 /// the scroll handler so dragged items track the cursor even when the
 /// viewport is scrolled mid-drag.
-pub fn update_drag_position(widget: &super::PianoRollWidget, dx: f64, dy: f64) {
+pub fn update_drag_position(widget: &super::PianoRollWidget, dx: f64, _dy: f64) {
     let imp = widget.imp();
+    let drag_mode = imp.drag_state.borrow().mode;
 
     // ── Playhead drag ──────────────────────────────────────────────
 
@@ -345,14 +438,123 @@ pub fn update_drag_position(widget: &super::PianoRollWidget, dx: f64, dy: f64) {
         return;
     }
 
-    // ── Note drag ──────────────────────────────────────────────────
+    // ── Box selection drag ─────────────────────────────────────────
+
+    if drag_mode == DragMode::BoxSelect {
+        let sx = imp.drag_state.borrow().start_x;
+        let sy = imp.drag_state.borrow().start_y;
+        let ox = *imp.scroll_x.borrow();
+        let vp = widget.build_viewport();
+
+        let cursor_x = *imp.cursor_x.borrow();
+        let cursor_y = *imp.cursor_y.borrow();
+
+        let abs_x0 = sx + ox;
+        let abs_x1 = cursor_x - KEY_WIDTH + ox;
+        let y0 = sy;
+        let y1 = cursor_y;
+
+        let pitch0 = vp.y_to_pitch(y0);
+        let pitch1 = vp.y_to_pitch(y1);
+        let pitch_lo = pitch0.min(pitch1);
+        let pitch_hi = pitch0.max(pitch1);
+
+        *imp.selection_rect.borrow_mut() = Some(SelectionRect {
+            abs_x0: abs_x0.min(abs_x1),
+            abs_x1: abs_x0.max(abs_x1),
+            pitch_lo,
+            pitch_hi,
+        });
+
+        // Find notes inside the selection rectangle
+        let zx = *imp.zoom_x.borrow();
+        let act = *imp.active_track.borrow();
+        let mut new_sel = std::collections::HashSet::new();
+        if let Some(midi) = &*imp.data.borrow() {
+            let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
+            if act < midi.tracks.len() {
+                let x_lo = abs_x0.min(abs_x1);
+                let x_hi = abs_x0.max(abs_x1);
+                for (i, note) in midi.tracks[act].notes.iter().enumerate() {
+                    let nx = (note.start_tick as f64 / tps) * zx;
+                    let nw = ((note.end_tick - note.start_tick) as f64 / tps) * zx;
+                    // Note intersects rect if ranges overlap
+                    if nx + nw >= x_lo
+                        && nx <= x_hi
+                        && note.pitch >= pitch_lo
+                        && note.pitch <= pitch_hi
+                    {
+                        new_sel.insert(i);
+                    }
+                }
+            }
+        }
+        // Union with base_selection (for Shift+append)
+        let base = &imp.drag_state.borrow().base_selection;
+        for &idx in base.iter() {
+            new_sel.insert(idx);
+        }
+        *imp.selected_notes.borrow_mut() = new_sel;
+        widget.update_status();
+        widget.queue_draw();
+        return;
+    }
+
+    // ── Bulk move ────────────────────────────────────────────────
+
+    if drag_mode == DragMode::BulkMove {
+        if let Some(midi) = &mut *imp.data.borrow_mut() {
+            let act = *imp.active_track.borrow();
+            if act >= midi.tracks.len() {
+                return;
+            }
+            let zx = *imp.zoom_x.borrow();
+            let ox = *imp.scroll_x.borrow();
+            let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
+
+            let cursor_x = *imp.cursor_x.borrow();
+            let cursor_y = *imp.cursor_y.borrow();
+
+            let current_abs_x = cursor_x - KEY_WIDTH + ox;
+            let cursor_tick = (current_abs_x / zx) * tps;
+
+            let start_pitch = imp.drag_state.borrow().start_pitch;
+            let vp = widget.build_viewport();
+            let current_cursor_pitch = vp.y_to_pitch(cursor_y);
+            let dpitch = current_cursor_pitch as i32 - start_pitch as i32;
+
+            let start_cursor_tick = imp.drag_state.borrow().start_cursor_tick;
+            let delta_ticks = cursor_tick - start_cursor_tick;
+
+            let orig_notes = imp.drag_state.borrow().orig_notes.clone();
+
+            for (&idx, orig) in &orig_notes {
+                if idx >= midi.tracks[act].notes.len() {
+                    continue;
+                }
+                let n = &mut midi.tracks[act].notes[idx];
+                let dur = orig.end_tick as i64 - orig.start_tick as i64;
+                let ns = (orig.start_tick as f64 + delta_ticks).max(0.0) as u64;
+                let ns_snapped = snap_tick(ns, midi.ticks_per_beat);
+                let ne = ns_snapped as i64 + dur;
+                let np = (orig.pitch as i32 + dpitch).clamp(0, 127) as u8;
+                n.start_tick = ns_snapped;
+                n.end_tick = ne.max(0) as u64;
+                n.pitch = np;
+            }
+        }
+        widget.queue_draw();
+        return;
+    }
+
+    // ── Single note drag (Draw mode) ───────────────────────────────
 
     let orig = match imp.drag_state.borrow().orig_note.clone() {
         Some(o) => o,
         None => return,
     };
-    let drag_mode = imp.drag_state.borrow().mode;
-    let idx = match *imp.selected_note.borrow() {
+    // Get the single selected note index
+    let idx = match imp.selected_notes.borrow().iter().next().copied() {
         Some(i) => i,
         None => return,
     };
@@ -363,12 +565,11 @@ pub fn update_drag_position(widget: &super::PianoRollWidget, dx: f64, dy: f64) {
             return;
         }
         let zx = *imp.zoom_x.borrow();
-        let zy = *imp.zoom_y.borrow();
         let ox = *imp.scroll_x.borrow();
         let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
-        let sx = imp.drag_state.borrow().start_x;
-
-        let current_abs_x = sx + dx + ox;
+        let cursor_x = *imp.cursor_x.borrow();
+        let cursor_y = *imp.cursor_y.borrow();
+        let current_abs_x = cursor_x - KEY_WIDTH + ox;
         let cursor_tick = (current_abs_x / zx) * tps;
         let synth_index = midi.tracks[act].synth_index;
 
@@ -381,8 +582,9 @@ pub fn update_drag_position(widget: &super::PianoRollWidget, dx: f64, dy: f64) {
             n.end_tick = ne_snapped.max(n.start_tick + min_dur);
         } else if drag_mode == DragMode::MoveNote {
             let dur = orig.end_tick as i64 - orig.start_tick as i64;
-            let click_offset = imp.drag_state.borrow().click_offset_ticks;
-            let target_start = cursor_tick - click_offset;
+            let start_cursor_tick = imp.drag_state.borrow().start_cursor_tick;
+            let delta_ticks = cursor_tick - start_cursor_tick;
+            let target_start = orig.start_tick as f64 + delta_ticks;
             let ns = if target_start < 0.0 {
                 0
             } else {
@@ -391,7 +593,10 @@ pub fn update_drag_position(widget: &super::PianoRollWidget, dx: f64, dy: f64) {
             let ns_snapped = snap_tick(ns, midi.ticks_per_beat);
             let ne = ns_snapped as i64 + dur;
 
-            let dpitch = -(dy / zy).round() as i32;
+            let start_pitch = imp.drag_state.borrow().start_pitch;
+            let vp = widget.build_viewport();
+            let current_cursor_pitch = vp.y_to_pitch(cursor_y);
+            let dpitch = current_cursor_pitch as i32 - start_pitch as i32;
             let np = (orig.pitch as i32 + dpitch).clamp(0, 127) as u8;
 
             // Preview pitch change
@@ -417,8 +622,15 @@ pub fn update_drag_position(widget: &super::PianoRollWidget, dx: f64, dy: f64) {
 }
 
 fn handle_drag_update(widget: &super::PianoRollWidget, dx: f64, dy: f64) {
+    let imp = widget.imp();
     {
-        let mut ds = widget.imp().drag_state.borrow_mut();
+        let ds = imp.drag_state.borrow();
+        // start_x is relative to KEY_WIDTH, so cursor_x = start_x + dx + KEY_WIDTH
+        *imp.cursor_x.borrow_mut() = ds.start_x + dx + KEY_WIDTH;
+        *imp.cursor_y.borrow_mut() = ds.start_y + dy;
+    }
+    {
+        let mut ds = imp.drag_state.borrow_mut();
         ds.last_dx = dx;
         ds.last_dy = dy;
     }
@@ -427,6 +639,7 @@ fn handle_drag_update(widget: &super::PianoRollWidget, dx: f64, dy: f64) {
 
 fn handle_drag_end(widget: &super::PianoRollWidget, dx: f64, _dy: f64) {
     let imp = widget.imp();
+    let drag_mode = imp.drag_state.borrow().mode;
 
     let is_playhead_drag = imp.drag_state.borrow().is_dragging_playhead;
     let has_orig_note = imp.drag_state.borrow().orig_note.is_some();
@@ -443,6 +656,17 @@ fn handle_drag_end(widget: &super::PianoRollWidget, dx: f64, _dy: f64) {
         if let Some(cb) = &*imp.seek_callback.borrow() {
             cb(t);
         }
+    } else if drag_mode == DragMode::BoxSelect {
+        // Finalize box selection — rect is already computed in update
+        *imp.selection_rect.borrow_mut() = None;
+        widget.update_status();
+        widget.queue_draw();
+    } else if drag_mode == DragMode::BulkMove {
+        // Finalize bulk move
+        if let Some(cb) = &*imp.data_changed_callback.borrow() {
+            cb();
+        }
+        widget.queue_draw();
     } else if has_orig_note {
         let active_opt = *imp.preview_active_pitch.borrow();
         if let Some(active) = active_opt {
@@ -461,6 +685,8 @@ fn handle_drag_end(widget: &super::PianoRollWidget, dx: f64, _dy: f64) {
     {
         let mut ds = imp.drag_state.borrow_mut();
         ds.orig_note = None;
+        ds.orig_notes.clear();
+        ds.base_selection.clear();
         ds.mode = DragMode::None;
     }
     // Reset cursor to default when drag ends
@@ -487,10 +713,9 @@ fn handle_scroll(
         zx = zx.clamp(10.0, 1000.0);
         *imp.zoom_x.borrow_mut() = zx;
 
-        let center_x_pixels = widget.width() as f64 / 2.0;
+        // Keep the left edge fixed: scale scroll_x by the same ratio.
         let mut sx = *imp.scroll_x.borrow();
-        let center_time = (sx + center_x_pixels) / old_zx;
-        sx = center_time * zx - center_x_pixels;
+        sx = sx / old_zx * zx;
         if sx < 0.0 {
             sx = 0.0;
         }
@@ -516,28 +741,35 @@ fn handle_scroll(
     }
 
     sy = sy.clamp(0.0, max_scroll_y.max(0.0));
-    *imp.scroll_y.borrow_mut() = sy;
 
-    // If a drag is active, re-run position update with stored dx/dy
-    // so the dragged item tracks the cursor after scroll.
+    // If a drag is active, update scroll and re-derive dx/dy from the
+    // actual cursor position so the dragged item follows the pointer.
     let is_dragging = {
         let ds = imp.drag_state.borrow();
-        ds.is_dragging_playhead || ds.orig_note.is_some()
+        ds.is_dragging_playhead
+            || ds.orig_note.is_some()
+            || ds.mode == DragMode::BoxSelect
+            || ds.mode == DragMode::BulkMove
     };
     if is_dragging {
-        let (last_dx, last_dy) = {
-            let ds = imp.drag_state.borrow();
-            (ds.last_dx, ds.last_dy)
-        };
-        // Must update scroll_x BEFORE calling update_drag_position
         if sx < 0.0 {
             sx = 0.0;
         }
         *imp.scroll_x.borrow_mut() = sx;
-        update_drag_position(widget, last_dx, last_dy);
+        *imp.scroll_y.borrow_mut() = sy;
+        // Derive dx/dy from the known cursor position
+        let cursor_x = *imp.cursor_x.borrow();
+        let cursor_y = *imp.cursor_y.borrow();
+        let ds = imp.drag_state.borrow();
+        let new_dx = cursor_x - KEY_WIDTH - ds.start_x;
+        let new_dy = cursor_y - ds.start_y;
+        drop(ds);
+        update_drag_position(widget, new_dx, new_dy);
         widget.queue_draw();
         return glib::Propagation::Stop;
     }
+
+    *imp.scroll_y.borrow_mut() = sy;
 
     if sx < 0.0 {
         sx = 0.0;
@@ -570,16 +802,38 @@ fn handle_key_press(widget: &super::PianoRollWidget, keyval: gdk::Key) -> glib::
         }
     }
 
-    // ── Delete note ────────────────────────────────────────────────
+    // ── Toggle edit mode with B ───────────────────────────────────
+    // Only when typing keyboard is NOT active (B is used for C2 octave otherwise)
+    if !*imp.typing_keyboard_enabled.borrow() {
+        if keyval == gdk::Key::b || keyval == gdk::Key::B {
+            let current = *imp.edit_mode.borrow();
+            let new_mode = match current {
+                EditMode::Draw => EditMode::Select,
+                EditMode::Select => EditMode::Draw,
+            };
+            widget.set_edit_mode(new_mode);
+            return glib::Propagation::Stop;
+        }
+    }
+
+    // ── Delete selected notes ──────────────────────────────────────
     let mut changed = false;
 
     if keyval == gdk::Key::Delete || keyval == gdk::Key::BackSpace {
-        if let Some(idx) = *imp.selected_note.borrow() {
+        let indices: Vec<usize> = imp.selected_notes.borrow().iter().copied().collect();
+        if !indices.is_empty() {
             if let Some(midi) = &mut *imp.data.borrow_mut() {
                 let act = *imp.active_track.borrow();
                 if act < midi.tracks.len() {
-                    midi.tracks[act].notes.remove(idx);
-                    *imp.selected_note.borrow_mut() = None;
+                    // Remove in reverse order to keep indices valid
+                    let mut sorted = indices;
+                    sorted.sort_unstable_by(|a, b| b.cmp(a));
+                    for idx in sorted {
+                        if idx < midi.tracks[act].notes.len() {
+                            midi.tracks[act].notes.remove(idx);
+                        }
+                    }
+                    imp.selected_notes.borrow_mut().clear();
                     widget.queue_draw();
                     changed = true;
                 }
@@ -591,6 +845,7 @@ fn handle_key_press(widget: &super::PianoRollWidget, keyval: gdk::Key) -> glib::
         if let Some(cb) = &*imp.data_changed_callback.borrow() {
             cb();
         }
+        widget.update_status();
         return glib::Propagation::Stop;
     }
     glib::Propagation::Proceed
@@ -618,14 +873,23 @@ fn handle_key_released(widget: &super::PianoRollWidget, keyval: gdk::Key) {
 
 fn handle_motion(widget: &super::PianoRollWidget, x: f64, y: f64) {
     let imp = widget.imp();
+    *imp.cursor_x.borrow_mut() = x;
+    *imp.cursor_y.borrow_mut() = y;
 
     // Don't change cursor during an active drag
     {
         let ds = imp.drag_state.borrow();
-        if ds.is_dragging_playhead || ds.orig_note.is_some() {
+        if ds.is_dragging_playhead
+            || ds.orig_note.is_some()
+            || ds.mode == DragMode::BoxSelect
+            || ds.mode == DragMode::BulkMove
+        {
             return;
         }
     }
+
+    // In Select mode, default cursor is crosshair
+    let is_select_mode = *imp.edit_mode.borrow() == EditMode::Select;
 
     if x < KEY_WIDTH {
         widget.set_cursor_from_name(None);
@@ -647,11 +911,17 @@ fn handle_motion(widget: &super::PianoRollWidget, x: f64, y: f64) {
 
     let vp = widget.build_viewport();
     let target_pitch = vp.y_to_pitch(y);
-    let mut cursor_name = None;
+    let mut cursor_name = if is_select_mode {
+        Some("crosshair")
+    } else {
+        None
+    };
 
     if let Some(midi) = &*imp.data.borrow() {
         if let Some(hit) = hit_test_note(midi, act_track, zx, abs_x, target_pitch) {
-            if hit.drag_mode == DragMode::ResizeDuration {
+            if is_select_mode && imp.selected_notes.borrow().contains(&hit.note_index) {
+                cursor_name = Some("grab");
+            } else if hit.drag_mode == DragMode::ResizeDuration {
                 cursor_name = Some("col-resize");
             }
         }

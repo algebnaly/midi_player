@@ -1,6 +1,6 @@
 //! Piano keyboard strip rendering (left edge of the roll).
 
-use super::types::{Theme, KEY_WIDTH};
+use super::types::{KEY_WIDTH, Theme};
 use super::viewport::Viewport;
 use gtk::graphene;
 use gtk::prelude::*;
@@ -11,13 +11,13 @@ use gtk4 as gtk;
 /// pixels, and the 7 white keys are distributed unevenly to leave room
 /// for black keys.
 const WHITE_KEY_OFFSETS: [(f32, f32); 7] = [
-    (0.0, 5.0 / 3.0),          // C
-    (5.0 / 3.0, 10.0 / 3.0),   // D
-    (10.0 / 3.0, 5.0),         // E
-    (5.0, 5.0 + 1.75),         // F
-    (5.0 + 1.75, 5.0 + 3.5),   // G
-    (5.0 + 3.5, 5.0 + 5.25),   // A
-    (5.0 + 5.25, 12.0),        // B
+    (0.0, 5.0 / 3.0),        // C
+    (5.0 / 3.0, 10.0 / 3.0), // D
+    (10.0 / 3.0, 5.0),       // E
+    (5.0, 5.0 + 1.75),       // F
+    (5.0 + 1.75, 5.0 + 3.5), // G
+    (5.0 + 3.5, 5.0 + 5.25), // A
+    (5.0 + 5.25, 12.0),      // B
 ];
 
 /// Render the piano keyboard strip on the left side of the widget.

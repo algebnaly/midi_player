@@ -6,7 +6,7 @@
 //! interactions to the [`Player`] backend.
 
 use gtk::prelude::*;
-use gtk::{ApplicationWindow, Box, Button, DropDown, HeaderBar, StringList, ToggleButton};
+use gtk::{ApplicationWindow, Box, Button, DropDown, HeaderBar, Label, StringList, ToggleButton};
 use gtk4 as gtk;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,6 +15,7 @@ use std::time::Duration;
 use crate::config::AppConfig;
 use crate::midi::MidiData;
 use crate::piano_roll::PianoRollWidget;
+use crate::piano_roll::types::EditMode;
 use crate::player::Player;
 
 /// Try to get the X11 window ID from a GTK4 window.
@@ -50,7 +51,7 @@ pub fn build_ui(app: &gtk::Application) {
     let track_list = StringList::new(&[]);
     let track_dropdown = DropDown::new(Some(track_list.clone()), gtk::Expression::NONE);
 
-    let bpm_adj = gtk::Adjustment::new(config.default_bpm, 20.0, 300.0, 1.0, 10.0, 0.0);
+    let bpm_adj = gtk::Adjustment::new(config.default_bpm, 20.0, 999.0, 1.0, 10.0, 0.0);
     let bpm_spin = gtk::SpinButton::new(Some(&bpm_adj), 1.0, 0);
     bpm_spin.set_tooltip_text(Some("BPM"));
     let bpm_box = Box::new(gtk::Orientation::Horizontal, 5);
@@ -66,10 +67,17 @@ pub fn build_ui(app: &gtk::Application) {
          A S D F G H J → C3–B3  |  Z X C V B N M → C2–B2",
     ));
 
+    let select_mode_btn = ToggleButton::with_label("⬚ Select");
+    select_mode_btn.set_tooltip_text(Some(
+        "Toggle Select mode (B):\n\
+         Draw a box to select notes, then drag to move them.",
+    ));
+
     header_bar.pack_start(&open_btn);
     header_bar.pack_start(&save_btn);
     header_bar.pack_start(&track_dropdown);
     header_bar.pack_start(&plugin_gui_btn);
+    header_bar.pack_start(&select_mode_btn);
     header_bar.pack_start(&typing_kb_btn);
     header_bar.pack_start(&bpm_box);
 
@@ -83,6 +91,58 @@ pub fn build_ui(app: &gtk::Application) {
     let piano_roll = PianoRollWidget::new();
     piano_roll.set_default_note_beats(config.default_note_beats);
     vbox.append(&piano_roll);
+
+    // Status bar at the bottom — full width, fixed height
+    let status_bar = Label::new(Some("[Draw]"));
+    status_bar.set_xalign(0.0);
+    status_bar.set_hexpand(true);
+    status_bar.set_vexpand(false);
+    status_bar.add_css_class("status-bar");
+    vbox.append(&status_bar);
+
+    // Apply minimal CSS for the status bar
+    let css_provider = gtk::CssProvider::new();
+    css_provider.load_from_data(
+        ".status-bar { font-family: monospace; font-size: 14px; font-weight: bold; \
+         padding: 6px 10px; background: #1a1a1a; color: #eee; \
+         min-height: 22px; }",
+    );
+    gtk::style_context_add_provider_for_display(
+        &gtk::gdk::Display::default().unwrap(),
+        &css_provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+
+    // Wire status callback
+    let status_bar_clone = status_bar.clone();
+    piano_roll.connect_status(move |msg| {
+        status_bar_clone.set_text(msg);
+    });
+
+    // Wire select mode toggle button
+    let pr_select = piano_roll.clone();
+    let _select_mode_btn_clone = select_mode_btn.clone();
+    select_mode_btn.connect_toggled(move |btn| {
+        let mode = if btn.is_active() {
+            EditMode::Select
+        } else {
+            EditMode::Draw
+        };
+        pr_select.set_edit_mode(mode);
+        pr_select.grab_focus();
+    });
+
+    // Also sync the button when edit mode changes from keyboard shortcut
+    // (We'll use a timer to poll — simpler than a custom signal)
+    let pr_mode_poll = piano_roll.clone();
+    let select_btn_poll = select_mode_btn.clone();
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        let is_select = pr_mode_poll.get_edit_mode() == EditMode::Select;
+        if select_btn_poll.is_active() != is_select {
+            select_btn_poll.set_active(is_select);
+        }
+        glib::ControlFlow::Continue
+    });
 
     // Wire typing keyboard toggle
     let pr_typing = piano_roll.clone();

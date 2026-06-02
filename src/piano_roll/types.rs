@@ -3,6 +3,7 @@
 use crate::midi::Note;
 use gtk::gdk;
 use gtk4 as gtk;
+use std::collections::HashMap;
 
 // ── Layout constants ───────────────────────────────────────────────────
 
@@ -39,6 +40,25 @@ pub fn snap_tick_to_beat(tick: u64, ticks_per_beat: u16) -> u64 {
     tick / align_grid * align_grid
 }
 
+// ── Edit mode ──────────────────────────────────────────────────────────
+
+/// Top-level interaction mode for the piano roll.
+#[derive(Default, Debug, PartialEq, Copy, Clone)]
+pub enum EditMode {
+    #[default]
+    Draw,
+    Select,
+}
+
+impl EditMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            EditMode::Draw => "Draw",
+            EditMode::Select => "Select",
+        }
+    }
+}
+
 // ── Drag mode ──────────────────────────────────────────────────────────
 
 #[derive(Default, Debug, PartialEq, Copy, Clone)]
@@ -47,6 +67,23 @@ pub enum DragMode {
     None,
     MoveNote,
     ResizeDuration,
+    /// Rubber-band box selection.
+    BoxSelect,
+    /// Bulk-dragging all selected notes.
+    BulkMove,
+}
+
+// ── Selection rectangle ───────────────────────────────────────────────
+
+/// Screen-space rectangle for the rubber-band selection overlay.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectionRect {
+    /// Absolute X in pixels (time=0 → 0px, no KEY_WIDTH, no scroll).
+    pub abs_x0: f64,
+    pub abs_x1: f64,
+    /// MIDI pitch range (inclusive).
+    pub pitch_lo: u8,
+    pub pitch_hi: u8,
 }
 
 // ── Drag state ─────────────────────────────────────────────────────────
@@ -57,14 +94,20 @@ pub struct DragState {
     pub mode: DragMode,
     pub is_dragging_playhead: bool,
     pub start_x: f64,
-    /// Offset in ticks from note start_tick to where the click landed.
-    pub click_offset_ticks: f64,
+    pub start_y: f64,
+    pub start_pitch: u8,
+    /// The absolute tick value the cursor was at when the drag started.
+    pub start_cursor_tick: f64,
     /// Last dx from GestureDrag (for scroll-during-drag re-sync).
     pub last_dx: f64,
     /// Last dy from GestureDrag.
     pub last_dy: f64,
     /// Snapshot of the note at drag-begin, used as a reference for moves.
     pub orig_note: Option<Note>,
+    /// Snapshots of all selected notes at bulk-drag begin (index → note).
+    pub orig_notes: HashMap<usize, Note>,
+    /// Pre-existing selection at box-select begin (for Shift+select append).
+    pub base_selection: std::collections::HashSet<usize>,
 }
 
 // ── Hit-test result ────────────────────────────────────────────────────
@@ -100,6 +143,8 @@ pub struct Theme {
     pub active_black_key: gdk::RGBA,
     pub key_border: gdk::RGBA,
     pub key_text: gdk::RGBA,
+    pub selection_rect_fill: gdk::RGBA,
+    pub selection_rect_border: gdk::RGBA,
 }
 
 /// Create the default dark theme matching the original hard-coded colors.
@@ -125,6 +170,8 @@ pub fn default_theme() -> Theme {
         active_black_key: gdk::RGBA::new(0.8, 0.6, 0.1, 1.0),
         key_border: gdk::RGBA::new(0.0, 0.0, 0.0, 1.0),
         key_text: gdk::RGBA::new(0.2, 0.2, 0.2, 1.0),
+        selection_rect_fill: gdk::RGBA::new(0.3, 0.5, 1.0, 0.15),
+        selection_rect_border: gdk::RGBA::new(0.4, 0.6, 1.0, 0.6),
     }
 }
 
