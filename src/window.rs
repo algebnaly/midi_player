@@ -52,9 +52,12 @@ pub fn build_ui(app: &gtk::Application) {
 
     let typing_kb_btn = ToggleButton::with_label("⌨ Typing Keyboard");
     typing_kb_btn.set_tooltip_text(Some(
-        "Play notes with your keyboard (white keys, 4 octaves):\n\
-         1-7 → C5–B5  |  Q W E R T Y U → C4–B4\n\
-         A S D F G H J → C3–B3  |  Z X C V B N M → C2–B2",
+        "Play notes with your keyboard:\n\
+         1 2 3 4 5 → C#4 D#4 F#4 G#4 A#4\n\
+         Q W E R T Y U → C4 D4 E4 F4 G4 A4 B4\n\
+         A S D F G → C#3 D#3 F#3 G#3 A#3\n\
+         Z X C V B N M → C3 D3 E3 F3 G3 A3 B3\n\
+         Shift: octave up  |  Ctrl: octave down",
     ));
 
     let select_mode_btn = ToggleButton::with_label("⬚ Select");

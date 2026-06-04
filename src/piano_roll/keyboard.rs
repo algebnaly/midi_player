@@ -5,6 +5,7 @@ use super::viewport::Viewport;
 use gtk::graphene;
 use gtk::prelude::*;
 use gtk4 as gtk;
+use std::collections::HashSet;
 
 /// Relative Y offsets for each white key within an octave (bottom, top)
 /// expressed as multiples of `zoom_y`.  The 12 semitones span 12 × zoom_y
@@ -25,7 +26,7 @@ pub fn render_keyboard(
     snapshot: &gtk::Snapshot,
     vp: &Viewport,
     pango_ctx: &gtk::pango::Context,
-    active_pitch: Option<u8>,
+    active_pitches: &HashSet<u8>,
     theme: &Theme,
 ) {
     let kw = KEY_WIDTH as f32;
@@ -53,7 +54,7 @@ pub fn render_keyboard(
             continue;
         }
 
-        let is_active = active_pitch == Some(pitch);
+        let is_active = active_pitches.contains(&pitch);
         let color = if is_active {
             &theme.active_white_key
         } else {
@@ -91,7 +92,7 @@ pub fn render_keyboard(
             continue;
         }
 
-        let is_active = active_pitch == Some(pitch);
+        let is_active = active_pitches.contains(&pitch);
         let color = if is_active {
             &theme.active_black_key
         } else {
@@ -117,6 +118,17 @@ pub fn render_keyboard(
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+pub fn keyboard_active_pitches(
+    preview_active_pitch: Option<u8>,
+    typing_pressed_pitches: impl IntoIterator<Item = u8>,
+) -> HashSet<u8> {
+    let mut active_pitches: HashSet<u8> = typing_pressed_pitches.into_iter().collect();
+    if let Some(pitch) = preview_active_pitch {
+        active_pitches.insert(pitch);
+    }
+    active_pitches
+}
+
 #[inline]
 fn is_black_key(pitch: u8) -> bool {
     matches!(pitch % 12, 1 | 3 | 6 | 8 | 10)
@@ -134,5 +146,20 @@ fn white_key_index(pitch: u8) -> usize {
         9 => 5,  // A
         11 => 6, // B
         _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_pitch_set_supports_multiple_highlights() {
+        let active_pitches = keyboard_active_pitches(Some(64), [60, 67]);
+
+        assert!(active_pitches.contains(&60));
+        assert!(active_pitches.contains(&64));
+        assert!(active_pitches.contains(&67));
+        assert_eq!(active_pitches.len(), 3);
     }
 }

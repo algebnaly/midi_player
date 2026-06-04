@@ -22,10 +22,10 @@ mod viewport;
 use crate::midi::MidiData;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
-use gtk::{glib, graphene};
+use gtk::{gdk, glib, graphene};
 use gtk4 as gtk;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use types::{DragState, EditMode, KEY_WIDTH, SelectionRect};
 use viewport::Viewport;
@@ -64,8 +64,10 @@ mod imp {
         // ── Typing keyboard ───────────────────────────────────────
         /// When true, QWERTY keys trigger note-on/off.
         pub typing_keyboard_enabled: RefCell<bool>,
-        /// Currently held keys (by MIDI pitch) so we can send note-off.
-        pub typing_pressed_pitches: RefCell<HashSet<u8>>,
+        /// Currently held typing keys and their original pitch, so note-off is stable.
+        pub typing_pressed_keys: RefCell<HashMap<gdk::Key, u8>>,
+        /// Persistent octave offset for typing-keyboard mode.
+        pub typing_octave_offset: RefCell<i8>,
 
         // ── Configuration ─────────────────────────────────────────
         /// Default note duration in beats (from config).
@@ -153,13 +155,11 @@ mod imp {
 
             // Piano keyboard (left side, on top of everything)
             let pango_ctx = obj.pango_context();
-            keyboard::render_keyboard(
-                snapshot,
-                &vp,
-                &pango_ctx,
+            let active_pitches = keyboard::keyboard_active_pitches(
                 *self.preview_active_pitch.borrow(),
-                &theme,
+                self.typing_pressed_keys.borrow().values().copied(),
             );
+            keyboard::render_keyboard(snapshot, &vp, &pango_ctx, &active_pitches, &theme);
         }
     }
 }
@@ -356,19 +356,14 @@ impl PianoRollWidget {
     /// Release all currently held typing-keyboard notes.
     fn release_all_typing_keys(&self) {
         let imp = self.imp();
-        let pitches: Vec<u8> = imp
-            .typing_pressed_pitches
-            .borrow()
-            .iter()
-            .copied()
-            .collect();
+        let pitches: Vec<u8> = imp.typing_pressed_keys.borrow().values().copied().collect();
         let synth_index = self.active_synth_index();
         for pitch in pitches {
             if let Some(cb) = &*imp.preview_note_off_callback.borrow() {
                 cb(synth_index, pitch);
             }
         }
-        imp.typing_pressed_pitches.borrow_mut().clear();
+        imp.typing_pressed_keys.borrow_mut().clear();
         // Clear visual highlight
         *imp.preview_active_pitch.borrow_mut() = None;
         self.queue_draw();

@@ -21,51 +21,121 @@ use std::collections::HashMap;
 /// Map a GDK keyval to a MIDI pitch when the typing keyboard mode is
 /// active.  Returns `None` for unmapped keys.
 ///
-/// White keys only, 7 per row, 4 octaves:
+/// Two octave rows, each with white keys and black keys:
 ///
 /// ```text
-///   1  2  3  4  5  6  7       → C5 D5 E5 F5 G5 A5 B5
-///   Q  W  E  R  T  Y  U       → C4 D4 E4 F4 G4 A4 B4
-///   A  S  D  F  G  H  J       → C3 D3 E3 F3 G3 A3 B3
-///   Z  X  C  V  B  N  M       → C2 D2 E2 F2 G2 A2 B2
+///   1  2  3  4  5       → C#4 D#4 F#4 G#4 A#4
+///   Q  W  E  R  T  Y  U → C4  D4  E4  F4  G4  A4  B4
+///   A  S  D  F  G       → C#3 D#3 F#3 G#3 A#3
+///   Z  X  C  V  B  N  M → C3  D3  E3  F3  G3  A3  B3
 /// ```
 fn typing_key_to_pitch(keyval: gdk::Key) -> Option<u8> {
-    // White-key semitone offsets within an octave: C=0 D=2 E=4 F=5 G=7 A=9 B=11
-    const W: [u8; 7] = [0, 2, 4, 5, 7, 9, 11];
+    typing_key_to_pitch_with_octave(keyval, 0)
+}
+
+fn typing_key_to_pitch_with_octave(keyval: gdk::Key, octave_offset: i8) -> Option<u8> {
+    let base_pitch = match keyval {
+        // ── Upper black row → C#4 D#4 F#4 G#4 A#4 ────────────────
+        gdk::Key::_1 => 61,
+        gdk::Key::_2 => 63,
+        gdk::Key::_3 => 66,
+        gdk::Key::_4 => 68,
+        gdk::Key::_5 => 70,
+        // ── Upper white row → C4 D4 E4 F4 G4 A4 B4 ──────────────
+        gdk::Key::q | gdk::Key::Q => 60,
+        gdk::Key::w | gdk::Key::W => 62,
+        gdk::Key::e | gdk::Key::E => 64,
+        gdk::Key::r | gdk::Key::R => 65,
+        gdk::Key::t | gdk::Key::T => 67,
+        gdk::Key::y | gdk::Key::Y => 69,
+        gdk::Key::u | gdk::Key::U => 71,
+        // ── Lower black row → C#3 D#3 F#3 G#3 A#3 ────────────────
+        gdk::Key::a | gdk::Key::A => 49,
+        gdk::Key::s | gdk::Key::S => 51,
+        gdk::Key::d | gdk::Key::D => 54,
+        gdk::Key::f | gdk::Key::F => 56,
+        gdk::Key::g | gdk::Key::G => 58,
+        // ── Lower white row → C3 D3 E3 F3 G3 A3 B3 ──────────────
+        gdk::Key::z | gdk::Key::Z => 48,
+        gdk::Key::x | gdk::Key::X => 50,
+        gdk::Key::c | gdk::Key::C => 52,
+        gdk::Key::v | gdk::Key::V => 53,
+        gdk::Key::b | gdk::Key::B => 55,
+        gdk::Key::n | gdk::Key::N => 57,
+        gdk::Key::m | gdk::Key::M => 59,
+        _ => return None,
+    };
+    let shifted = base_pitch + i16::from(octave_offset) * 12;
+    u8::try_from(shifted).ok().filter(|pitch| *pitch <= 127)
+}
+
+fn is_typing_octave_up_key(keyval: gdk::Key) -> bool {
     match keyval {
-        // ── Number row → C5 (base 72) ─────────────────────────────
-        gdk::Key::_1 => Some(72 + W[0]),
-        gdk::Key::_2 => Some(72 + W[1]),
-        gdk::Key::_3 => Some(72 + W[2]),
-        gdk::Key::_4 => Some(72 + W[3]),
-        gdk::Key::_5 => Some(72 + W[4]),
-        gdk::Key::_6 => Some(72 + W[5]),
-        gdk::Key::_7 => Some(72 + W[6]),
-        // ── QWERTY row → C4 (base 60) ────────────────────────────
-        gdk::Key::q | gdk::Key::Q => Some(60 + W[0]),
-        gdk::Key::w | gdk::Key::W => Some(60 + W[1]),
-        gdk::Key::e | gdk::Key::E => Some(60 + W[2]),
-        gdk::Key::r | gdk::Key::R => Some(60 + W[3]),
-        gdk::Key::t | gdk::Key::T => Some(60 + W[4]),
-        gdk::Key::y | gdk::Key::Y => Some(60 + W[5]),
-        gdk::Key::u | gdk::Key::U => Some(60 + W[6]),
-        // ── Home row → C3 (base 48) ──────────────────────────────
-        gdk::Key::a | gdk::Key::A => Some(48 + W[0]),
-        gdk::Key::s | gdk::Key::S => Some(48 + W[1]),
-        gdk::Key::d | gdk::Key::D => Some(48 + W[2]),
-        gdk::Key::f | gdk::Key::F => Some(48 + W[3]),
-        gdk::Key::g | gdk::Key::G => Some(48 + W[4]),
-        gdk::Key::h | gdk::Key::H => Some(48 + W[5]),
-        gdk::Key::j | gdk::Key::J => Some(48 + W[6]),
-        // ── Bottom row → C2 (base 36) ─────────────────────────────
-        gdk::Key::z | gdk::Key::Z => Some(36 + W[0]),
-        gdk::Key::x | gdk::Key::X => Some(36 + W[1]),
-        gdk::Key::c | gdk::Key::C => Some(36 + W[2]),
-        gdk::Key::v | gdk::Key::V => Some(36 + W[3]),
-        gdk::Key::b | gdk::Key::B => Some(36 + W[4]),
-        gdk::Key::n | gdk::Key::N => Some(36 + W[5]),
-        gdk::Key::m | gdk::Key::M => Some(36 + W[6]),
-        _ => None,
+        gdk::Key::Shift_L | gdk::Key::Shift_R => true,
+        _ => false,
+    }
+}
+
+fn is_typing_octave_down_key(keyval: gdk::Key) -> bool {
+    match keyval {
+        gdk::Key::Control_L | gdk::Key::Control_R => true,
+        _ => false,
+    }
+}
+
+fn remove_released_typing_key(
+    pressed_keys: &mut HashMap<gdk::Key, u8>,
+    keyval: gdk::Key,
+) -> Option<(u8, Option<u8>)> {
+    let pitch = pressed_keys.remove(&keyval)?;
+    let remaining = pressed_keys.values().copied().next();
+    Some((pitch, remaining))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_upper_white_and_black_key_rows() {
+        assert_eq!(typing_key_to_pitch(gdk::Key::q), Some(60));
+        assert_eq!(typing_key_to_pitch(gdk::Key::w), Some(62));
+        assert_eq!(typing_key_to_pitch(gdk::Key::u), Some(71));
+
+        assert_eq!(typing_key_to_pitch(gdk::Key::_1), Some(61));
+        assert_eq!(typing_key_to_pitch(gdk::Key::_2), Some(63));
+        assert_eq!(typing_key_to_pitch(gdk::Key::_3), Some(66));
+        assert_eq!(typing_key_to_pitch(gdk::Key::_4), Some(68));
+        assert_eq!(typing_key_to_pitch(gdk::Key::_5), Some(70));
+    }
+
+    #[test]
+    fn maps_lower_white_and_black_key_rows() {
+        assert_eq!(typing_key_to_pitch(gdk::Key::z), Some(48));
+        assert_eq!(typing_key_to_pitch(gdk::Key::x), Some(50));
+        assert_eq!(typing_key_to_pitch(gdk::Key::m), Some(59));
+
+        assert_eq!(typing_key_to_pitch(gdk::Key::a), Some(49));
+        assert_eq!(typing_key_to_pitch(gdk::Key::s), Some(51));
+        assert_eq!(typing_key_to_pitch(gdk::Key::d), Some(54));
+        assert_eq!(typing_key_to_pitch(gdk::Key::f), Some(56));
+        assert_eq!(typing_key_to_pitch(gdk::Key::g), Some(58));
+    }
+
+    #[test]
+    fn applies_octave_offset() {
+        assert_eq!(typing_key_to_pitch_with_octave(gdk::Key::q, 1), Some(72));
+        assert_eq!(typing_key_to_pitch_with_octave(gdk::Key::z, -1), Some(36));
+    }
+
+    #[test]
+    fn removes_released_key_and_returns_remaining_pitch() {
+        let mut pressed = HashMap::from([(gdk::Key::q, 60), (gdk::Key::w, 62)]);
+
+        let released = remove_released_typing_key(&mut pressed, gdk::Key::q);
+
+        assert_eq!(released, Some((60, Some(62))));
+        assert_eq!(pressed, HashMap::from([(gdk::Key::w, 62)]));
     }
 }
 
@@ -785,13 +855,25 @@ fn handle_key_press(widget: &super::PianoRollWidget, keyval: gdk::Key) -> glib::
 
     // ── Typing keyboard mode ──────────────────────────────────────
     if *imp.typing_keyboard_enabled.borrow() {
-        if let Some(pitch) = typing_key_to_pitch(keyval) {
-            // Ignore auto-repeat: if pitch is already held, skip.
-            if imp.typing_pressed_pitches.borrow().contains(&pitch) {
+        if is_typing_octave_up_key(keyval) {
+            let mut offset = imp.typing_octave_offset.borrow_mut();
+            *offset = (*offset + 1).min(5);
+            return glib::Propagation::Stop;
+        }
+        if is_typing_octave_down_key(keyval) {
+            let mut offset = imp.typing_octave_offset.borrow_mut();
+            *offset = (*offset - 1).max(-4);
+            return glib::Propagation::Stop;
+        }
+
+        let octave_offset = *imp.typing_octave_offset.borrow();
+        if let Some(pitch) = typing_key_to_pitch_with_octave(keyval, octave_offset) {
+            // Ignore auto-repeat: if this physical key is already held, skip.
+            if imp.typing_pressed_keys.borrow().contains_key(&keyval) {
                 return glib::Propagation::Stop;
             }
             let synth_index = widget.active_synth_index();
-            imp.typing_pressed_pitches.borrow_mut().insert(pitch);
+            imp.typing_pressed_keys.borrow_mut().insert(keyval, pitch);
             // Visual highlight on the keyboard strip
             *imp.preview_active_pitch.borrow_mut() = Some(pitch);
             if let Some(cb) = &*imp.preview_note_on_callback.borrow() {
@@ -857,17 +939,17 @@ fn handle_key_released(widget: &super::PianoRollWidget, keyval: gdk::Key) {
     if !*imp.typing_keyboard_enabled.borrow() {
         return;
     }
-    if let Some(pitch) = typing_key_to_pitch(keyval) {
-        if imp.typing_pressed_pitches.borrow_mut().remove(&pitch) {
-            let synth_index = widget.active_synth_index();
-            if let Some(cb) = &*imp.preview_note_off_callback.borrow() {
-                cb(synth_index, pitch);
-            }
-            // Update visual: show the last remaining held pitch, or None.
-            let remaining: Option<u8> = imp.typing_pressed_pitches.borrow().iter().copied().next();
-            *imp.preview_active_pitch.borrow_mut() = remaining;
-            widget.queue_draw();
+    let released = {
+        let mut pressed_keys = imp.typing_pressed_keys.borrow_mut();
+        remove_released_typing_key(&mut pressed_keys, keyval)
+    };
+    if let Some((pitch, remaining)) = released {
+        let synth_index = widget.active_synth_index();
+        if let Some(cb) = &*imp.preview_note_off_callback.borrow() {
+            cb(synth_index, pitch);
         }
+        *imp.preview_active_pitch.borrow_mut() = remaining;
+        widget.queue_draw();
     }
 }
 
