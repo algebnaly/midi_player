@@ -312,6 +312,9 @@ impl PianoRollWidget {
 
     pub fn set_edit_mode(&self, mode: EditMode) {
         *self.imp().edit_mode.borrow_mut() = mode;
+        if mode != EditMode::Draw {
+            self.set_typing_keyboard_enabled(false);
+        }
         // Clear selection rect when switching modes
         *self.imp().selection_rect.borrow_mut() = None;
         self.update_status();
@@ -325,12 +328,31 @@ impl PianoRollWidget {
     /// Push a status update through the callback.
     pub(crate) fn update_status(&self) {
         let imp = self.imp();
-        let mode = *imp.edit_mode.borrow();
-        let sel_count = imp.selected_notes.borrow().len();
-        let msg = if sel_count > 0 {
-            format!("[{}] {} note(s) selected", mode.label(), sel_count)
+        let keyboard_status = if *imp.typing_keyboard_enabled.borrow() {
+            let octave_offset = *imp.typing_octave_offset.borrow();
+            Some(format!(
+                "[Keyboard] Oct {octave_offset:+}  Q={}  Z={}",
+                note_name(60 + i16::from(octave_offset) * 12),
+                note_name(48 + i16::from(octave_offset) * 12)
+            ))
         } else {
-            format!("[{}]", mode.label())
+            None
+        };
+        let sel_count = imp.selected_notes.borrow().len();
+        let msg = if let Some(status) = keyboard_status {
+            if sel_count > 0 {
+                format!("{status}  {sel_count} note(s) selected")
+            } else {
+                status
+            }
+        } else if sel_count > 0 {
+            format!(
+                "[{}] {} note(s) selected",
+                imp.edit_mode.borrow().label(),
+                sel_count
+            )
+        } else {
+            format!("[{}]", imp.edit_mode.borrow().label())
         };
         if let Some(cb) = &*imp.status_callback.borrow() {
             cb(&msg);
@@ -342,15 +364,34 @@ impl PianoRollWidget {
     /// Enable or disable the typing-keyboard-to-piano mode.
     pub fn set_typing_keyboard_enabled(&self, enabled: bool) {
         *self.imp().typing_keyboard_enabled.borrow_mut() = enabled;
+        if enabled {
+            *self.imp().edit_mode.borrow_mut() = EditMode::Draw;
+            *self.imp().selection_rect.borrow_mut() = None;
+        }
         // When disabling, release all held notes.
         if !enabled {
             self.release_all_typing_keys();
         }
+        self.update_status();
+        self.queue_draw();
     }
 
     /// Query whether the typing keyboard mode is active.
     pub fn is_typing_keyboard_enabled(&self) -> bool {
         *self.imp().typing_keyboard_enabled.borrow()
+    }
+
+    pub fn enter_normal_mode(&self) {
+        self.set_typing_keyboard_enabled(false);
+        self.set_edit_mode(EditMode::Draw);
+    }
+
+    pub fn enter_select_mode(&self) {
+        self.set_edit_mode(EditMode::Select);
+    }
+
+    pub fn enter_typing_keyboard_mode(&self) {
+        self.set_typing_keyboard_enabled(true);
     }
 
     /// Release all currently held typing-keyboard notes.
@@ -367,5 +408,26 @@ impl PianoRollWidget {
         // Clear visual highlight
         *imp.preview_active_pitch.borrow_mut() = None;
         self.queue_draw();
+    }
+}
+
+fn note_name(pitch: i16) -> String {
+    const NAMES: [&str; 12] = [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ];
+    let pitch = pitch.clamp(0, 127);
+    let octave = pitch / 12 - 1;
+    format!("{}{}", NAMES[pitch as usize % 12], octave)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn note_name_formats_midi_octaves() {
+        assert_eq!(note_name(60), "C4");
+        assert_eq!(note_name(48), "C3");
+        assert_eq!(note_name(72), "C5");
     }
 }

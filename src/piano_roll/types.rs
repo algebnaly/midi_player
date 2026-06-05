@@ -53,7 +53,7 @@ pub enum EditMode {
 impl EditMode {
     pub fn label(self) -> &'static str {
         match self {
-            EditMode::Draw => "Draw",
+            EditMode::Draw => "Normal",
             EditMode::Select => "Select",
         }
     }

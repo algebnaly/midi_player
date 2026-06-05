@@ -12,6 +12,7 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk4 as gtk;
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 // ────────────────────────────────────────────────────────────────────────
@@ -71,14 +72,14 @@ fn typing_key_to_pitch_with_octave(keyval: gdk::Key, octave_offset: i8) -> Optio
 
 fn is_typing_octave_up_key(keyval: gdk::Key) -> bool {
     match keyval {
-        gdk::Key::Shift_L | gdk::Key::Shift_R => true,
+        gdk::Key::Up => true,
         _ => false,
     }
 }
 
 fn is_typing_octave_down_key(keyval: gdk::Key) -> bool {
     match keyval {
-        gdk::Key::Control_L | gdk::Key::Control_R => true,
+        gdk::Key::Down => true,
         _ => false,
     }
 }
@@ -90,6 +91,58 @@ fn remove_released_typing_key(
     let pitch = pressed_keys.remove(&keyval)?;
     let remaining = pressed_keys.values().copied().next();
     Some((pitch, remaining))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ModeKeyAction {
+    EnterSelect,
+    EnterKeyboard,
+    ReturnNormal,
+}
+
+fn mode_key_action(
+    keyval: gdk::Key,
+    edit_mode: EditMode,
+    typing_keyboard_enabled: bool,
+) -> Option<ModeKeyAction> {
+    if keyval == gdk::Key::Escape {
+        return Some(ModeKeyAction::ReturnNormal);
+    }
+    if typing_keyboard_enabled || edit_mode != EditMode::Draw {
+        return None;
+    }
+    match keyval {
+        gdk::Key::b | gdk::Key::B => Some(ModeKeyAction::EnterSelect),
+        gdk::Key::k | gdk::Key::K => Some(ModeKeyAction::EnterKeyboard),
+        _ => None,
+    }
+}
+
+fn mode_key_action_from_state(
+    keyval: gdk::Key,
+    edit_mode: &RefCell<EditMode>,
+    typing_keyboard_enabled: &RefCell<bool>,
+) -> Option<ModeKeyAction> {
+    let edit_mode = *edit_mode.borrow();
+    let typing_keyboard_enabled = *typing_keyboard_enabled.borrow();
+    mode_key_action(keyval, edit_mode, typing_keyboard_enabled)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ScrollAction {
+    Pan,
+    HorizontalPan,
+    Zoom,
+}
+
+fn scroll_action(state: gdk::ModifierType) -> ScrollAction {
+    if state.contains(gdk::ModifierType::CONTROL_MASK) {
+        ScrollAction::Zoom
+    } else if state.contains(gdk::ModifierType::SHIFT_MASK) {
+        ScrollAction::HorizontalPan
+    } else {
+        ScrollAction::Pan
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +189,79 @@ mod tests {
 
         assert_eq!(released, Some((60, Some(62))));
         assert_eq!(pressed, HashMap::from([(gdk::Key::w, 62)]));
+    }
+
+    #[test]
+    fn normal_mode_keys_enter_select_or_keyboard() {
+        assert_eq!(
+            mode_key_action(gdk::Key::b, EditMode::Draw, false),
+            Some(ModeKeyAction::EnterSelect)
+        );
+        assert_eq!(
+            mode_key_action(gdk::Key::k, EditMode::Draw, false),
+            Some(ModeKeyAction::EnterKeyboard)
+        );
+    }
+
+    #[test]
+    fn b_does_not_toggle_select_back_to_draw() {
+        assert_eq!(mode_key_action(gdk::Key::b, EditMode::Select, false), None);
+    }
+
+    #[test]
+    fn escape_returns_to_normal_from_any_mode() {
+        assert_eq!(
+            mode_key_action(gdk::Key::Escape, EditMode::Select, false),
+            Some(ModeKeyAction::ReturnNormal)
+        );
+        assert_eq!(
+            mode_key_action(gdk::Key::Escape, EditMode::Draw, true),
+            Some(ModeKeyAction::ReturnNormal)
+        );
+    }
+
+    #[test]
+    fn mode_key_action_from_state_drops_refcell_borrows_before_mutation() {
+        let edit_mode = std::cell::RefCell::new(EditMode::Draw);
+        let typing_keyboard_enabled = std::cell::RefCell::new(false);
+
+        if mode_key_action_from_state(gdk::Key::Escape, &edit_mode, &typing_keyboard_enabled)
+            .is_some()
+        {
+            *typing_keyboard_enabled.borrow_mut() = false;
+        }
+    }
+
+    #[test]
+    fn ctrl_scroll_keeps_zoom_behavior() {
+        assert_eq!(
+            scroll_action(gdk::ModifierType::CONTROL_MASK),
+            ScrollAction::Zoom
+        );
+    }
+
+    #[test]
+    fn shift_scroll_keeps_horizontal_pan_behavior() {
+        assert_eq!(
+            scroll_action(gdk::ModifierType::SHIFT_MASK),
+            ScrollAction::HorizontalPan
+        );
+    }
+
+    #[test]
+    fn arrow_keys_change_keyboard_octave() {
+        assert!(is_typing_octave_up_key(gdk::Key::Up));
+        assert!(is_typing_octave_down_key(gdk::Key::Down));
+    }
+
+    #[test]
+    fn shift_and_ctrl_are_not_keyboard_octave_controls() {
+        assert!(!is_typing_octave_up_key(gdk::Key::Shift_L));
+        assert!(!is_typing_octave_down_key(gdk::Key::Control_L));
+        assert_eq!(
+            scroll_action(gdk::ModifierType::CONTROL_MASK),
+            ScrollAction::Zoom
+        );
     }
 }
 
@@ -771,10 +897,11 @@ fn handle_scroll(
 ) -> glib::Propagation {
     let imp = widget.imp();
     let state = controller.current_event_state();
+    let action = scroll_action(state);
 
     // ── Ctrl+scroll: zoom ──────────────────────────────────────────
 
-    if state.contains(gdk::ModifierType::CONTROL_MASK) {
+    if action == ScrollAction::Zoom {
         let mut zx = *imp.zoom_x.borrow();
         let old_zx = zx;
 
@@ -803,7 +930,7 @@ fn handle_scroll(
     let mut sy = *imp.scroll_y.borrow();
     let mut sx = *imp.scroll_x.borrow();
 
-    if state.contains(gdk::ModifierType::SHIFT_MASK) {
+    if action == ScrollAction::HorizontalPan {
         sx += (dx + dy) * 50.0;
     } else {
         sy -= dy * 40.0;
@@ -853,16 +980,32 @@ fn handle_scroll(
 fn handle_key_press(widget: &super::PianoRollWidget, keyval: gdk::Key) -> glib::Propagation {
     let imp = widget.imp();
 
+    if let Some(action) =
+        mode_key_action_from_state(keyval, &imp.edit_mode, &imp.typing_keyboard_enabled)
+    {
+        match action {
+            ModeKeyAction::EnterSelect => widget.enter_select_mode(),
+            ModeKeyAction::EnterKeyboard => widget.enter_typing_keyboard_mode(),
+            ModeKeyAction::ReturnNormal => widget.enter_normal_mode(),
+        }
+        widget.grab_focus();
+        return glib::Propagation::Stop;
+    }
+
     // ── Typing keyboard mode ──────────────────────────────────────
     if *imp.typing_keyboard_enabled.borrow() {
         if is_typing_octave_up_key(keyval) {
             let mut offset = imp.typing_octave_offset.borrow_mut();
             *offset = (*offset + 1).min(5);
+            drop(offset);
+            widget.update_status();
             return glib::Propagation::Stop;
         }
         if is_typing_octave_down_key(keyval) {
             let mut offset = imp.typing_octave_offset.borrow_mut();
             *offset = (*offset - 1).max(-4);
+            drop(offset);
+            widget.update_status();
             return glib::Propagation::Stop;
         }
 
@@ -880,20 +1023,6 @@ fn handle_key_press(widget: &super::PianoRollWidget, keyval: gdk::Key) -> glib::
                 cb(synth_index, pitch, 100);
             }
             widget.queue_draw();
-            return glib::Propagation::Stop;
-        }
-    }
-
-    // ── Toggle edit mode with B ───────────────────────────────────
-    // Only when typing keyboard is NOT active (B is used for C2 octave otherwise)
-    if !*imp.typing_keyboard_enabled.borrow() {
-        if keyval == gdk::Key::b || keyval == gdk::Key::B {
-            let current = *imp.edit_mode.borrow();
-            let new_mode = match current {
-                EditMode::Draw => EditMode::Select,
-                EditMode::Select => EditMode::Draw,
-            };
-            widget.set_edit_mode(new_mode);
             return glib::Propagation::Stop;
         }
     }

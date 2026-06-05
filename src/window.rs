@@ -8,7 +8,7 @@
 use gtk::prelude::*;
 use gtk::{ApplicationWindow, Box, Button, DropDown, HeaderBar, Label, StringList, ToggleButton};
 use gtk4 as gtk;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -57,12 +57,13 @@ pub fn build_ui(app: &gtk::Application) {
          Q W E R T Y U → C4 D4 E4 F4 G4 A4 B4\n\
          A S D F G → C#3 D#3 F#3 G#3 A#3\n\
          Z X C V B N M → C3 D3 E3 F3 G3 A3 B3\n\
-         Shift: octave up  |  Ctrl: octave down",
+         K from Normal: enter  |  Esc: return\n\
+         ↑: octave up  |  ↓: octave down",
     ));
 
     let select_mode_btn = ToggleButton::with_label("⬚ Select");
     select_mode_btn.set_tooltip_text(Some(
-        "Toggle Select mode (B):\n\
+        "Select mode (B from Normal, Esc to return):\n\
          Draw a box to select notes, then drag to move them.",
     ));
 
@@ -115,13 +116,17 @@ pub fn build_ui(app: &gtk::Application) {
     // Wire select mode toggle button
     let pr_select = piano_roll.clone();
     let _select_mode_btn_clone = select_mode_btn.clone();
+    let syncing_mode_buttons = Rc::new(Cell::new(false));
+    let select_sync_guard = syncing_mode_buttons.clone();
     select_mode_btn.connect_toggled(move |btn| {
-        let mode = if btn.is_active() {
-            EditMode::Select
+        if select_sync_guard.get() {
+            return;
+        }
+        if btn.is_active() {
+            pr_select.enter_select_mode();
         } else {
-            EditMode::Draw
-        };
-        pr_select.set_edit_mode(mode);
+            pr_select.enter_normal_mode();
+        }
         pr_select.grab_focus();
     });
 
@@ -129,18 +134,36 @@ pub fn build_ui(app: &gtk::Application) {
     // (We'll use a timer to poll — simpler than a custom signal)
     let pr_mode_poll = piano_roll.clone();
     let select_btn_poll = select_mode_btn.clone();
+    let typing_btn_poll = typing_kb_btn.clone();
+    let poll_sync_guard = syncing_mode_buttons.clone();
     glib::timeout_add_local(Duration::from_millis(100), move || {
         let is_select = pr_mode_poll.get_edit_mode() == EditMode::Select;
         if select_btn_poll.is_active() != is_select {
+            poll_sync_guard.set(true);
             select_btn_poll.set_active(is_select);
+            poll_sync_guard.set(false);
+        }
+        let is_typing = pr_mode_poll.is_typing_keyboard_enabled();
+        if typing_btn_poll.is_active() != is_typing {
+            poll_sync_guard.set(true);
+            typing_btn_poll.set_active(is_typing);
+            poll_sync_guard.set(false);
         }
         glib::ControlFlow::Continue
     });
 
     // Wire typing keyboard toggle
     let pr_typing = piano_roll.clone();
+    let typing_sync_guard = syncing_mode_buttons.clone();
     typing_kb_btn.connect_toggled(move |btn| {
-        pr_typing.set_typing_keyboard_enabled(btn.is_active());
+        if typing_sync_guard.get() {
+            return;
+        }
+        if btn.is_active() {
+            pr_typing.enter_typing_keyboard_mode();
+        } else {
+            pr_typing.enter_normal_mode();
+        }
         // When enabling, grab focus on the piano roll so it receives key events.
         if btn.is_active() {
             pr_typing.grab_focus();
