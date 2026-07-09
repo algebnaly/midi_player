@@ -146,6 +146,9 @@ impl MidiData {
             a.time_seconds
                 .partial_cmp(&b.time_seconds)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    same_time_event_order(&a.event_type).cmp(&same_time_event_order(&b.event_type))
+                })
         });
         events
     }
@@ -389,5 +392,67 @@ impl MidiData {
     pub fn export_to_file(&self, path: &str) -> Result<()> {
         fs::write(path, self.to_buffer())?;
         Ok(())
+    }
+}
+
+/// Tie-breaker for [`MidiData::compile_events`]: at the same timestamp, NoteOff
+/// must be dispatched before NoteOn (same rule as [`MidiData::to_smf`]).
+fn same_time_event_order(event: &MidiEventType) -> u8 {
+    match event {
+        MidiEventType::NoteOff { .. } => 0,
+        MidiEventType::NoteOn { .. } => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn note(pitch: u8, start: u64, end: u64) -> Note {
+        Note {
+            pitch,
+            velocity: 100,
+            start_tick: start,
+            end_tick: end,
+            channel: 0,
+        }
+    }
+
+    fn midi_with(notes: Vec<Note>) -> MidiData {
+        MidiData {
+            tracks: vec![TrackData {
+                name: "t0".into(),
+                notes,
+                synth_index: 0,
+            }],
+            ticks_per_beat: 480,
+            tempo_map: vec![(0, 500_000)],
+        }
+    }
+
+    fn boundary_event_kinds(midi: &MidiData) -> Vec<&'static str> {
+        midi.compile_events()
+            .iter()
+            .filter(|e| (e.time_seconds - 0.5).abs() < 1e-9)
+            .map(|e| match &e.event_type {
+                MidiEventType::NoteOn { .. } => "on",
+                MidiEventType::NoteOff { .. } => "off",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compile_events_note_off_before_note_on_at_same_time() {
+        // Later note stored first in Vec — the case that triggered the bug.
+        let midi = midi_with(vec![note(60, 480, 960), note(60, 0, 480)]);
+        let boundary = boundary_event_kinds(&midi);
+        assert_eq!(boundary, &["off", "on"]);
+    }
+
+    #[test]
+    fn compile_events_chronological_note_order_still_works() {
+        let midi = midi_with(vec![note(60, 0, 480), note(60, 480, 960)]);
+        let boundary = boundary_event_kinds(&midi);
+        assert_eq!(boundary, &["off", "on"]);
     }
 }
