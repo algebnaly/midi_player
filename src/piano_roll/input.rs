@@ -30,6 +30,7 @@ use std::collections::HashMap;
 ///   A  S  D  F  G       → C#3 D#3 F#3 G#3 A#3
 ///   Z  X  C  V  B  N  M → C3  D3  E3  F3  G3  A3  B3
 /// ```
+#[cfg(test)]
 fn typing_key_to_pitch(keyval: gdk::Key) -> Option<u8> {
     typing_key_to_pitch_with_octave(keyval, 0)
 }
@@ -97,6 +98,7 @@ fn remove_released_typing_key(
 enum ModeKeyAction {
     EnterSelect,
     EnterKeyboard,
+    EnterPut,
     ReturnNormal,
 }
 
@@ -108,12 +110,15 @@ fn mode_key_action(
     if keyval == gdk::Key::Escape {
         return Some(ModeKeyAction::ReturnNormal);
     }
+    // Modes are only entered from Normal. Put shares Normal's editing tools,
+    // but remains a distinct mode and cannot jump directly to Select/Keyboard.
     if typing_keyboard_enabled || edit_mode != EditMode::Draw {
         return None;
     }
     match keyval {
         gdk::Key::b | gdk::Key::B => Some(ModeKeyAction::EnterSelect),
         gdk::Key::k | gdk::Key::K => Some(ModeKeyAction::EnterKeyboard),
+        gdk::Key::p | gdk::Key::P => Some(ModeKeyAction::EnterPut),
         _ => None,
     }
 }
@@ -201,6 +206,10 @@ mod tests {
             mode_key_action(gdk::Key::k, EditMode::Draw, false),
             Some(ModeKeyAction::EnterKeyboard)
         );
+        assert_eq!(
+            mode_key_action(gdk::Key::p, EditMode::Draw, false),
+            Some(ModeKeyAction::EnterPut)
+        );
     }
 
     #[test]
@@ -209,9 +218,20 @@ mod tests {
     }
 
     #[test]
+    fn put_mode_requires_returning_to_normal_before_switching_modes() {
+        assert_eq!(mode_key_action(gdk::Key::b, EditMode::Put, false), None);
+        assert_eq!(mode_key_action(gdk::Key::k, EditMode::Put, false), None);
+        assert_eq!(mode_key_action(gdk::Key::p, EditMode::Put, false), None);
+    }
+
+    #[test]
     fn escape_returns_to_normal_from_any_mode() {
         assert_eq!(
             mode_key_action(gdk::Key::Escape, EditMode::Select, false),
+            Some(ModeKeyAction::ReturnNormal)
+        );
+        assert_eq!(
+            mode_key_action(gdk::Key::Escape, EditMode::Put, false),
             Some(ModeKeyAction::ReturnNormal)
         );
         assert_eq!(
@@ -262,6 +282,16 @@ mod tests {
             scroll_action(gdk::ModifierType::CONTROL_MASK),
             ScrollAction::Zoom
         );
+    }
+
+    #[test]
+    fn ctrl_click_playhead_position_is_continuous_and_unsnapped() {
+        assert_eq!(playhead_time_for_click(KEY_WIDTH + 50.0, 25.0, 150.0), 0.5);
+        assert_eq!(
+            playhead_time_for_click(KEY_WIDTH + 1.0, 0.0, 150.0),
+            1.0 / 150.0
+        );
+        assert_eq!(playhead_time_for_click(KEY_WIDTH, 0.0, 0.0), 0.0);
     }
 }
 
@@ -330,10 +360,10 @@ pub fn setup_controllers(widget: &super::PianoRollWidget) {
     let drag = gtk::GestureDrag::new();
     let w = widget.clone();
     drag.connect_drag_begin(move |gesture, start_x, start_y| {
-        let shift = gesture
-            .current_event_state()
-            .contains(gdk::ModifierType::SHIFT_MASK);
-        handle_drag_begin(&w, start_x, start_y, shift);
+        let state = gesture.current_event_state();
+        let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+        let control = state.contains(gdk::ModifierType::CONTROL_MASK);
+        handle_drag_begin(&w, start_x, start_y, shift, control);
     });
     let w = widget.clone();
     drag.connect_drag_update(move |_, dx, dy| {
@@ -374,7 +404,7 @@ pub fn setup_controllers(widget: &super::PianoRollWidget) {
 // Event handlers
 // ────────────────────────────────────────────────────────────────────────
 
-/// Right-click: delete the note under the cursor (Draw mode only).
+/// Right-click: delete the note under the cursor (Draw and Put modes).
 fn handle_right_click(widget: &super::PianoRollWidget, x: f64, y: f64) {
     if x < KEY_WIDTH {
         return;
@@ -393,9 +423,11 @@ fn handle_right_click(widget: &super::PianoRollWidget, x: f64, y: f64) {
     let target_pitch = vp.y_to_pitch(y);
 
     let mut changed = false;
+    let mut deleted_note_index = None;
     if let Some(midi) = &mut *imp.data.borrow_mut() {
         if let Some(hit) = hit_test_note(midi, act_track, zx, abs_x, target_pitch) {
             midi.tracks[act_track].notes.remove(hit.note_index);
+            deleted_note_index = Some(hit.note_index);
             let mut new_sel = std::collections::HashSet::new();
             for &idx in imp.selected_notes.borrow().iter() {
                 if idx == hit.note_index {
@@ -412,6 +444,9 @@ fn handle_right_click(widget: &super::PianoRollWidget, x: f64, y: f64) {
         }
     }
     if changed {
+        if let Some(note_index) = deleted_note_index {
+            widget.handle_note_deleted(act_track, note_index);
+        }
         if let Some(cb) = &*imp.data_changed_callback.borrow() {
             cb();
         }
@@ -425,6 +460,7 @@ fn handle_drag_begin(
     start_x: f64,
     start_y: f64,
     shift_held: bool,
+    control_held: bool,
 ) {
     if start_x < KEY_WIDTH {
         return;
@@ -450,6 +486,18 @@ fn handle_drag_begin(
     let abs_x = sx_adj + scroll_x;
     let edit_mode = *imp.edit_mode.borrow();
 
+    // Shared across every mode: Ctrl+left-click immediately places and seeks
+    // the playhead without snapping or triggering note editing underneath.
+    if control_held {
+        let time = playhead_time_for_click(start_x, scroll_x, zx);
+        *imp.playhead_time.borrow_mut() = time;
+        if let Some(callback) = &*imp.seek_callback.borrow() {
+            callback(time);
+        }
+        widget.queue_draw();
+        return;
+    }
+
     if (sx_adj - p_x).abs() < PLAYHEAD_HIT_RADIUS || start_y < TOP_REGION_HEIGHT {
         imp.drag_state.borrow_mut().is_dragging_playhead = true;
         let mut t = abs_x / zx;
@@ -470,8 +518,17 @@ fn handle_drag_begin(
         EditMode::Select => {
             handle_drag_begin_select(widget, abs_x, target_pitch, act_track, shift_held)
         }
-        EditMode::Draw => handle_drag_begin_draw(widget, abs_x, target_pitch, act_track),
+        EditMode::Draw | EditMode::Put => {
+            handle_drag_begin_draw(widget, abs_x, target_pitch, act_track)
+        }
     }
+}
+
+fn playhead_time_for_click(pointer_x: f64, scroll_x: f64, zoom_x: f64) -> f64 {
+    if zoom_x <= 0.0 {
+        return 0.0;
+    }
+    ((pointer_x - KEY_WIDTH + scroll_x) / zoom_x).max(0.0)
 }
 
 fn handle_drag_begin_select(
@@ -980,12 +1037,17 @@ fn handle_scroll(
 fn handle_key_press(widget: &super::PianoRollWidget, keyval: gdk::Key) -> glib::Propagation {
     let imp = widget.imp();
 
+    if (keyval == gdk::Key::l || keyval == gdk::Key::L) && widget.toggle_put_length_quantization() {
+        return glib::Propagation::Stop;
+    }
+
     if let Some(action) =
         mode_key_action_from_state(keyval, &imp.edit_mode, &imp.typing_keyboard_enabled)
     {
         match action {
             ModeKeyAction::EnterSelect => widget.enter_select_mode(),
             ModeKeyAction::EnterKeyboard => widget.enter_typing_keyboard_mode(),
+            ModeKeyAction::EnterPut => widget.enter_put_mode(),
             ModeKeyAction::ReturnNormal => widget.enter_normal_mode(),
         }
         widget.grab_focus();

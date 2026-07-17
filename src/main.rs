@@ -17,11 +17,13 @@
 //!                                       └── clap_host/ + clap_audio/
 //! ```
 
+mod app_cache;
 mod audio_engine;
 mod clap_audio;
 mod clap_host;
 mod config;
 mod midi;
+mod midi_input;
 mod piano_roll;
 mod player;
 mod sequencer;

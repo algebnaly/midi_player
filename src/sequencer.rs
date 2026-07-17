@@ -13,8 +13,9 @@
 //! the last bar that contains notes (rounded up to a full bar boundary).
 
 use crate::midi::{MidiData, TimedEvent};
+use crate::midi_input::LiveNoteKey;
 use crate::synth::TrackSynth;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Number of beats per bar (time signature numerator).
 const BEATS_PER_BAR: u64 = 4;
@@ -112,7 +113,12 @@ impl CustomSequencer {
     /// notes that should stop receive NoteOff, and notes that should start
     /// receive NoteOn.  This avoids the audible re-attack that would result
     /// from a blanket `all_notes_off` + re-trigger cycle.
-    pub fn seek(&mut self, time: f64, synths: &mut [TrackSynth]) {
+    pub fn seek(
+        &mut self,
+        time: f64,
+        synths: &mut [TrackSynth],
+        live_notes: &HashMap<LiveNoteKey, u8>,
+    ) {
         self.playhead_time = time;
 
         // Compute the set of notes that *should* be active at `time`.
@@ -137,34 +143,38 @@ impl CustomSequencer {
             self.current_event_idx += 1;
         }
 
-        // Send NoteOff for notes that are currently active but should NOT be.
-        for (key, (synth_index, _vel)) in &self.active_notes {
-            if !target_active.contains_key(key) {
-                let (_track_idx, channel, pitch) = key;
-                let synth_idx = synth_index % synths.len();
-                if let Some(synth) = synths.get_mut(synth_idx) {
-                    synth.send_midi_event(
-                        *channel,
-                        &crate::midi::MidiEventType::NoteOff { pitch: *pitch },
-                    );
-                }
+        let old_outputs = output_note_set(&self.active_notes);
+        let target_outputs = output_note_set(&target_active);
+
+        // Only release an output voice if neither the target sequence state nor
+        // the live MIDI keyboard still owns it.
+        for &(synth_index, channel, pitch) in old_outputs.difference(&target_outputs) {
+            if !live_notes.contains_key(&(synth_index, channel, pitch)) {
+                send_to_synth(
+                    synths,
+                    synth_index,
+                    channel,
+                    &crate::midi::MidiEventType::NoteOff { pitch },
+                );
             }
         }
 
-        // Send NoteOn for notes that should be active but are NOT currently.
-        for (key, (synth_index, velocity)) in &target_active {
-            if !self.active_notes.contains_key(key) {
-                let (_track_idx, channel, pitch) = key;
-                let synth_idx = synth_index % synths.len();
-                if let Some(synth) = synths.get_mut(synth_idx) {
-                    synth.send_midi_event(
-                        *channel,
-                        &crate::midi::MidiEventType::NoteOn {
-                            pitch: *pitch,
-                            velocity: *velocity,
-                        },
-                    );
-                }
+        // Likewise, do not re-trigger a voice already held by the live input.
+        for &(synth_index, channel, pitch) in target_outputs.difference(&old_outputs) {
+            if !live_notes.contains_key(&(synth_index, channel, pitch)) {
+                let velocity = target_active
+                    .iter()
+                    .find_map(|((_, ch, p), (synth, velocity))| {
+                        (*synth == synth_index && *ch == channel && *p == pitch)
+                            .then_some(*velocity)
+                    })
+                    .unwrap_or(100);
+                send_to_synth(
+                    synths,
+                    synth_index,
+                    channel,
+                    &crate::midi::MidiEventType::NoteOn { pitch, velocity },
+                );
             }
         }
 
@@ -180,6 +190,7 @@ impl CustomSequencer {
     pub fn render_block(
         &mut self,
         synths: &mut [TrackSynth],
+        live_notes: &HashMap<LiveNoteKey, u8>,
         left: &mut [f32],
         right: &mut [f32],
         sample_rate: f64,
@@ -190,22 +201,15 @@ impl CustomSequencer {
         while frames_rendered < frames_total {
             // Check for loop: if playhead is at or past the loop end, rewind.
             if self.loop_end_time > 0.0 && self.playhead_time >= self.loop_end_time {
-                for synth in synths.iter_mut() {
-                    synth.all_notes_off();
-                }
+                self.silence_sequence_notes(synths, live_notes);
                 self.playhead_time = 0.0;
                 self.current_event_idx = 0;
-                self.active_notes.clear();
             }
 
             // Dispatch any events whose time has been reached (before rendering).
             while self.current_event_idx < self.events.len() {
                 let ev = &self.events[self.current_event_idx];
                 if ev.time_seconds <= self.playhead_time + EVENT_DISPATCH_TOLERANCE_SECS {
-                    let synth_idx = ev.synth_index % synths.len();
-                    if let Some(synth) = synths.get_mut(synth_idx) {
-                        synth.send_midi_event(ev.channel, &ev.event_type);
-                    }
                     // Update active_notes tracking.
                     let key: NoteKey = (
                         ev.track_index,
@@ -217,10 +221,22 @@ impl CustomSequencer {
                     );
                     match &ev.event_type {
                         crate::midi::MidiEventType::NoteOn { velocity, .. } => {
+                            let output_key = (ev.synth_index, ev.channel, key.2);
+                            let already_sounding = self.is_note_active(output_key)
+                                || live_notes.contains_key(&output_key);
                             self.active_notes.insert(key, (ev.synth_index, *velocity));
+                            if !already_sounding {
+                                send_to_synth(synths, ev.synth_index, ev.channel, &ev.event_type);
+                            }
                         }
                         crate::midi::MidiEventType::NoteOff { .. } => {
                             self.active_notes.remove(&key);
+                            let output_key = (ev.synth_index, ev.channel, key.2);
+                            if !self.is_note_active(output_key)
+                                && !live_notes.contains_key(&output_key)
+                            {
+                                send_to_synth(synths, ev.synth_index, ev.channel, &ev.event_type);
+                            }
                         }
                     }
                     self.current_event_idx += 1;
@@ -298,6 +314,46 @@ impl CustomSequencer {
         self.current_event_idx >= self.events.len()
     }
 
+    /// Return whether the sequencer currently owns this output voice.
+    pub fn is_note_active(&self, output_key: LiveNoteKey) -> bool {
+        self.active_notes
+            .iter()
+            .any(|((_, channel, pitch), (synth_index, _))| {
+                (*synth_index, *channel, *pitch) == output_key
+            })
+    }
+
+    /// Return the distinct pitches currently sounding on one MIDI track.
+    pub fn active_pitches_for_track(&self, track_index: usize) -> Vec<u8> {
+        let mut pitches: Vec<u8> = self
+            .active_notes
+            .keys()
+            .filter_map(|(track, _, pitch)| (*track == track_index).then_some(*pitch))
+            .collect();
+        pitches.sort_unstable();
+        pitches.dedup();
+        pitches
+    }
+
+    /// Release sequence-owned voices while preserving notes held by live MIDI.
+    pub fn silence_sequence_notes(
+        &mut self,
+        synths: &mut [TrackSynth],
+        live_notes: &HashMap<LiveNoteKey, u8>,
+    ) {
+        for (synth_index, channel, pitch) in output_note_set(&self.active_notes) {
+            if !live_notes.contains_key(&(synth_index, channel, pitch)) {
+                send_to_synth(
+                    synths,
+                    synth_index,
+                    channel,
+                    &crate::midi::MidiEventType::NoteOff { pitch },
+                );
+            }
+        }
+        self.active_notes.clear();
+    }
+
     // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------
@@ -331,5 +387,44 @@ impl CustomSequencer {
         } else {
             0.0
         }
+    }
+}
+
+fn output_note_set(notes: &HashMap<NoteKey, (usize, u8)>) -> HashSet<LiveNoteKey> {
+    notes
+        .iter()
+        .map(|((_, channel, pitch), (synth_index, _))| (*synth_index, *channel, *pitch))
+        .collect()
+}
+
+fn send_to_synth(
+    synths: &mut [TrackSynth],
+    synth_index: usize,
+    channel: u8,
+    event: &crate::midi::MidiEventType,
+) {
+    if synths.is_empty() {
+        return;
+    }
+    if let Some(synth) = synths.get_mut(synth_index % synths.len()) {
+        synth.send_midi_event(channel, event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_pitches_are_distinct_and_filtered_by_track() {
+        let mut sequencer = CustomSequencer::new();
+        sequencer.active_notes.insert((0, 0, 60), (0, 90));
+        sequencer.active_notes.insert((0, 1, 60), (0, 80));
+        sequencer.active_notes.insert((0, 0, 64), (0, 100));
+        sequencer.active_notes.insert((1, 0, 67), (0, 100));
+
+        assert_eq!(sequencer.active_pitches_for_track(0), vec![60, 64]);
+        assert_eq!(sequencer.active_pitches_for_track(1), vec![67]);
+        assert!(sequencer.active_pitches_for_track(2).is_empty());
     }
 }

@@ -37,6 +37,18 @@ src/
   bundle; auto-selects the first instrument descriptor.
 - **Live Note Preview** – click on the piano roll to audition notes through
   the selected track's synth engine.
+- **Physical MIDI Keyboard** – select an ALSA, CoreMIDI, or WinMM input device
+  and play the currently selected SoundFont or CLAP track with velocity and
+  MIDI-channel preservation.
+- **Put Mode** – press `P`, drag the playhead freely, then use a physical MIDI
+  keyboard to place notes on the current track. Inserted starts align to the
+  quarter-note grid; physical key-hold durations are quantized to binary note
+  values such as 32nd, 16th, 8th, quarter, half, and whole notes. Right-click
+  removes notes in this mode as well. All Normal-mode mouse editing remains
+  available while Put mode is active. Press `Esc` to return to Normal before
+  entering Select or Typing Keyboard mode. Length quantization is off by
+  default, producing fixed quarter notes; press `L` in Put mode to toggle
+  held-time binary length quantization.
 - **Hot-Swap Editing** – change BPM or edit notes while playing without
   interrupting the audio stream.
 - **MIDI File I/O** – open and export Standard MIDI Files (`.mid`).
@@ -51,6 +63,7 @@ src/
 | `clack-host`       | CLAP plugin hosting                 |
 | `clack-extensions` | CLAP extension implementations      |
 | `midly`            | MIDI file parsing / writing         |
+| `midir`            | Physical MIDI input                 |
 | `serde` + `toml`   | Configuration file parsing          |
 | `anyhow`           | Error handling                      |
 
@@ -99,11 +112,22 @@ clap_plugin_path = "./plugin.clap"
 cargo run
 ```
 
+4. Choose a device from the MIDI input dropdown in the header. Incoming notes
+   are routed to the currently selected track. Use **↻ MIDI** after connecting
+   or disconnecting a USB keyboard to refresh the device list.
+
+On Linux, MIDI input uses ALSA and requires the ALSA development package when
+building from source (for example `libasound2-dev` on Debian/Ubuntu).
+
 ## Key Bindings
 
 | Key     | Action            |
 |---------|-------------------|
 | `Space` | Play / Pause      |
+| `P`     | Enter Put mode    |
+| `L`     | Toggle Put length quantization |
+| `Esc`   | Return to Normal  |
+| `Ctrl` + left click | Place playhead at the exact clicked position |
 
 ## License
 

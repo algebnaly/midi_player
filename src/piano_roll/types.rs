@@ -40,6 +40,57 @@ pub fn snap_tick_to_beat(tick: u64, ticks_per_beat: u16) -> u64 {
     tick / align_grid * align_grid
 }
 
+/// Quantize a configured duration to a binary musical note length.
+///
+/// One beat is a quarter note, so powers of two in beat space represent
+/// 64th, 32nd, 16th, 8th, quarter, half and whole notes (and longer). This
+/// deliberately excludes dotted values such as three eighth notes.
+pub fn quantize_binary_note_length(beats: f64, ticks_per_beat: u16) -> u64 {
+    if !beats.is_finite() || beats <= 0.0 {
+        return (ticks_per_beat as u64 / 8).max(1);
+    }
+    let mut quantized_beats = 2.0f64.powi(-4);
+    let mut best_distance = (beats - quantized_beats).abs();
+    for exponent in -3..=4 {
+        let candidate = 2.0f64.powi(exponent);
+        let distance = (beats - candidate).abs();
+        // Prefer the longer value for an exact midpoint tie.
+        if distance <= best_distance {
+            quantized_beats = candidate;
+            best_distance = distance;
+        }
+    }
+    (quantized_beats * f64::from(ticks_per_beat))
+        .round()
+        .max(1.0) as u64
+}
+
+/// Convert a real key-hold duration to beats at the current tempo and then
+/// quantize it to a binary musical note length.
+pub fn quantize_held_note_length(elapsed_seconds: f64, bpm: f64, ticks_per_beat: u16) -> u64 {
+    let safe_bpm = if bpm.is_finite() && bpm > 0.0 {
+        bpm
+    } else {
+        120.0
+    };
+    quantize_binary_note_length(elapsed_seconds.max(0.0) * safe_bpm / 60.0, ticks_per_beat)
+}
+
+/// Resolve the Put-mode duration policy. Without quantization every note is
+/// exactly one quarter note; otherwise held time selects a binary note value.
+pub fn put_note_length(
+    quantization_enabled: bool,
+    elapsed_seconds: f64,
+    bpm: f64,
+    ticks_per_beat: u16,
+) -> u64 {
+    if quantization_enabled {
+        quantize_held_note_length(elapsed_seconds, bpm, ticks_per_beat)
+    } else {
+        u64::from(ticks_per_beat).max(1)
+    }
+}
+
 // ── Edit mode ──────────────────────────────────────────────────────────
 
 /// Top-level interaction mode for the piano roll.
@@ -48,6 +99,7 @@ pub enum EditMode {
     #[default]
     Draw,
     Select,
+    Put,
 }
 
 impl EditMode {
@@ -55,7 +107,14 @@ impl EditMode {
         match self {
             EditMode::Draw => "Normal",
             EditMode::Select => "Select",
+            EditMode::Put => "Put",
         }
+    }
+
+    /// Put mode retains every Normal editing interaction and only adds
+    /// physical-MIDI note capture.
+    pub fn supports_normal_editing(self) -> bool {
+        matches!(self, EditMode::Draw | EditMode::Put)
     }
 }
 
@@ -197,5 +256,38 @@ mod tests {
         assert_eq!(snap_tick_to_beat(480, 480), 480);
         assert_eq!(snap_tick_to_beat(960, 480), 960);
         assert_eq!(snap_tick_to_beat(1000, 480), 960);
+    }
+
+    #[test]
+    fn binary_note_length_excludes_dotted_values() {
+        assert_eq!(quantize_binary_note_length(0.125, 480), 60); // 32nd
+        assert_eq!(quantize_binary_note_length(0.25, 480), 120); // 16th
+        assert_eq!(quantize_binary_note_length(0.5, 480), 240); // 8th
+        assert_eq!(quantize_binary_note_length(1.0, 480), 480); // quarter
+        assert_eq!(quantize_binary_note_length(1.5, 480), 960); // half, not dotted quarter
+        assert_eq!(quantize_binary_note_length(3.0, 480), 1920); // whole, not dotted half
+    }
+
+    #[test]
+    fn held_time_selects_different_note_lengths() {
+        assert_eq!(quantize_held_note_length(0.0625, 120.0, 480), 60); // 32nd
+        assert_eq!(quantize_held_note_length(0.125, 120.0, 480), 120); // 16th
+        assert_eq!(quantize_held_note_length(0.25, 120.0, 480), 240); // 8th
+        assert_eq!(quantize_held_note_length(0.5, 120.0, 480), 480); // quarter
+        assert_eq!(quantize_held_note_length(0.75, 120.0, 480), 960); // half, never 720
+    }
+
+    #[test]
+    fn put_length_is_quarter_note_when_quantization_is_off() {
+        assert_eq!(put_note_length(false, 0.05, 120.0, 480), 480);
+        assert_eq!(put_note_length(false, 2.0, 120.0, 480), 480);
+        assert_eq!(put_note_length(true, 0.125, 120.0, 480), 120);
+    }
+
+    #[test]
+    fn put_mode_retains_normal_editing_capabilities() {
+        assert!(EditMode::Draw.supports_normal_editing());
+        assert!(EditMode::Put.supports_normal_editing());
+        assert!(!EditMode::Select.supports_normal_editing());
     }
 }

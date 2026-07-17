@@ -5,11 +5,15 @@
 //! exposes the negotiated sample rate so that the rest of the engine can
 //! configure itself accordingly.
 
+use crate::midi::MidiEventType;
+use crate::midi_input::{LiveMidiEvent, LiveNoteKey};
 use crate::sequencer::CustomSequencer;
 use crate::synth::TrackSynth;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use crossbeam_channel::Receiver;
 use oxisynth::Synth;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Holds the active CPAL output stream and provides the negotiated sample rate.
@@ -37,7 +41,10 @@ impl AudioEngine {
         sequencer: Arc<Mutex<CustomSequencer>>,
         synths: Arc<Mutex<Vec<TrackSynth>>>,
         preview_synth: Arc<Mutex<Synth>>,
+        live_midi_rx: Receiver<LiveMidiEvent>,
+        live_notes: Arc<Mutex<HashMap<LiveNoteKey, u8>>>,
         paused: Arc<AtomicBool>,
+        global_gain: Arc<AtomicU32>,
         silence_flushed: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
         let host = cpal::default_host();
@@ -82,22 +89,32 @@ impl AudioEngine {
 
                     let is_paused = paused_clone.load(Ordering::SeqCst);
 
-                    if !is_paused {
-                        // Playing: full sequencer (dispatches events + renders)
-                        if let Ok(mut seq) = sequencer.try_lock() {
-                            if let Ok(mut s_vec) = synths.try_lock() {
-                                tmp_l[..frames].fill(0.0);
-                                tmp_r[..frames].fill(0.0);
-                                seq.render_block(&mut s_vec, tmp_l, tmp_r, sample_rate);
-                                for i in 0..frames {
-                                    out_l[i] += tmp_l[i];
-                                    out_r[i] += tmp_r[i];
-                                }
+                    // Keep all live MIDI mutation on the audio thread. The
+                    // sequencer lock is also needed while paused so ownership
+                    // checks can prevent one source from cutting another off.
+                    if let Ok(mut seq) = sequencer.try_lock()
+                        && let Ok(mut s_vec) = synths.try_lock()
+                        && let Ok(mut held_live_notes) = live_notes.try_lock()
+                    {
+                        drain_live_midi(&live_midi_rx, &mut held_live_notes, &seq, &mut s_vec);
+
+                        if !is_paused {
+                            // Playing: sequencer dispatch + rendering.
+                            tmp_l[..frames].fill(0.0);
+                            tmp_r[..frames].fill(0.0);
+                            seq.render_block(
+                                &mut s_vec,
+                                &held_live_notes,
+                                tmp_l,
+                                tmp_r,
+                                sample_rate,
+                            );
+                            for i in 0..frames {
+                                out_l[i] += tmp_l[i];
+                                out_r[i] += tmp_r[i];
                             }
-                        }
-                    } else {
-                        // Paused: render track synths directly for preview
-                        if let Ok(mut s_vec) = synths.try_lock() {
+                        } else {
+                            // Paused: render synth tails and live input.
                             for synth in s_vec.iter_mut() {
                                 tmp_l[..frames].fill(0.0);
                                 tmp_r[..frames].fill(0.0);
@@ -121,11 +138,13 @@ impl AudioEngine {
                         }
                     }
 
-                    // Interleave into the CPAL buffer.
+                    // Apply the lock-free master gain after every source has
+                    // been mixed, then interleave into the CPAL buffer.
+                    let gain = f32::from_bits(global_gain.load(Ordering::Relaxed));
                     for (i, frame) in data.chunks_mut(channels).enumerate() {
-                        frame[0] = out_l[i];
+                        frame[0] = out_l[i] * gain;
                         if channels > 1 {
-                            frame[1] = out_r[i];
+                            frame[1] = out_r[i] * gain;
                         }
                     }
 
@@ -177,5 +196,57 @@ impl AudioEngine {
             .ok_or_else(|| anyhow::anyhow!("No output audio device available"))?;
         let config = device.default_output_config()?;
         Ok((device, config))
+    }
+}
+
+fn drain_live_midi(
+    receiver: &Receiver<LiveMidiEvent>,
+    live_notes: &mut HashMap<LiveNoteKey, u8>,
+    sequencer: &CustomSequencer,
+    synths: &mut [TrackSynth],
+) {
+    for event in receiver.try_iter() {
+        let key = event.key();
+        match event {
+            LiveMidiEvent::NoteOn {
+                channel,
+                pitch,
+                velocity,
+                ..
+            } => {
+                let already_sounding =
+                    live_notes.contains_key(&key) || sequencer.is_note_active(key);
+                live_notes.insert(key, velocity);
+                if !already_sounding {
+                    send_live_event(
+                        synths,
+                        key.0,
+                        channel,
+                        &MidiEventType::NoteOn { pitch, velocity },
+                    );
+                }
+            }
+            LiveMidiEvent::NoteOff { channel, pitch, .. } => {
+                let was_live = live_notes.remove(&key).is_some();
+                if was_live && !sequencer.is_note_active(key) {
+                    send_live_event(synths, key.0, channel, &MidiEventType::NoteOff { pitch });
+                }
+            }
+        }
+    }
+}
+
+fn send_live_event(
+    synths: &mut [TrackSynth],
+    synth_index: usize,
+    channel: u8,
+    event: &MidiEventType,
+) {
+    if synths.is_empty() {
+        return;
+    }
+    let synth_count = synths.len();
+    if let Some(synth) = synths.get_mut(synth_index % synth_count) {
+        synth.send_midi_event(channel, event);
     }
 }

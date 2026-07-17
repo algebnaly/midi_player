@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub default_bpm: f64,
     /// Default note duration in beats (e.g. 1.0 = quarter note, 0.125 = 32nd).
     pub default_note_beats: f64,
+    /// Master output gain applied after all synthesizers are mixed.
+    pub global_gain: f64,
     /// Path to the default SoundFont file.
     pub soundfont_path: String,
     /// Path to the default CLAP plugin file.
@@ -25,6 +27,7 @@ impl Default for AppConfig {
         Self {
             default_bpm: 120.0,
             default_note_beats: 1.0,
+            global_gain: 0.5,
             soundfont_path: "default.sf2".to_string(),
             clap_plugin_path: "./plugin.clap".to_string(),
         }

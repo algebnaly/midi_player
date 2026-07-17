@@ -12,11 +12,21 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::app_cache::{CachedMidiInput, clear_midi_input, load_midi_input, save_midi_input};
 use crate::config::AppConfig;
 use crate::midi::MidiData;
+use crate::midi_input::{MidiInputManager, MidiInputPortInfo};
 use crate::piano_roll::PianoRollWidget;
 use crate::piano_roll::types::EditMode;
 use crate::player::Player;
+
+fn cached_midi_port_position(ports: &[MidiInputPortInfo], cached: &CachedMidiInput) -> Option<u32> {
+    ports
+        .iter()
+        .position(|port| port.id == cached.port_id)
+        .or_else(|| ports.iter().position(|port| port.name == cached.port_name))
+        .map(|index| index as u32 + 1)
+}
 
 pub fn build_ui(app: &gtk::Application) {
     // Load user configuration
@@ -40,6 +50,11 @@ pub fn build_ui(app: &gtk::Application) {
 
     let track_list = StringList::new(&[]);
     let track_dropdown = DropDown::new(Some(track_list.clone()), gtk::Expression::NONE);
+    let midi_input_list = StringList::new(&["No MIDI Input"]);
+    let midi_input_dropdown = DropDown::new(Some(midi_input_list.clone()), gtk::Expression::NONE);
+    midi_input_dropdown.set_tooltip_text(Some("Physical MIDI keyboard input"));
+    let midi_refresh_btn = Button::with_label("↻ MIDI");
+    midi_refresh_btn.set_tooltip_text(Some("Refresh MIDI input devices"));
 
     let bpm_adj = gtk::Adjustment::new(config.default_bpm, 20.0, 999.0, 1.0, 10.0, 0.0);
     let bpm_spin = gtk::SpinButton::new(Some(&bpm_adj), 1.0, 0);
@@ -47,6 +62,18 @@ pub fn build_ui(app: &gtk::Application) {
     let bpm_box = Box::new(gtk::Orientation::Horizontal, 5);
     bpm_box.append(&gtk::Label::new(Some("BPM: ")));
     bpm_box.append(&bpm_spin);
+
+    let initial_gain = config.global_gain.clamp(0.0, 2.0);
+    let gain_adj = gtk::Adjustment::new(initial_gain, 0.0, 2.0, 0.01, 0.1, 0.0);
+    let gain_scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&gain_adj));
+    gain_scale.set_digits(2);
+    gain_scale.set_draw_value(true);
+    gain_scale.set_value_pos(gtk::PositionType::Right);
+    gain_scale.set_width_request(140);
+    gain_scale.set_tooltip_text(Some("Global output gain"));
+    let gain_box = Box::new(gtk::Orientation::Horizontal, 5);
+    gain_box.append(&gtk::Label::new(Some("Gain: ")));
+    gain_box.append(&gain_scale);
 
     let plugin_gui_btn = Button::with_label("Plugin GUI");
 
@@ -70,17 +97,26 @@ pub fn build_ui(app: &gtk::Application) {
     header_bar.pack_start(&open_btn);
     header_bar.pack_start(&save_btn);
     header_bar.pack_start(&track_dropdown);
+    header_bar.pack_start(&midi_input_dropdown);
+    header_bar.pack_start(&midi_refresh_btn);
     header_bar.pack_start(&plugin_gui_btn);
     header_bar.pack_start(&select_mode_btn);
     header_bar.pack_start(&typing_kb_btn);
     header_bar.pack_start(&bpm_box);
+    header_bar.pack_start(&gain_box);
 
     header_bar.pack_end(&rewind_btn);
     header_bar.pack_end(&pause_btn);
     header_bar.pack_end(&play_btn);
 
+    // Keep the existing application UI as the main child of an Overlay.
+    // Settings panels and other in-window floating surfaces can later be
+    // attached with `root_overlay.add_overlay(...)` without restructuring
+    // the window again.
+    let root_overlay = gtk::Overlay::new();
     let vbox = Box::new(gtk::Orientation::Vertical, 0);
-    window.set_child(Some(&vbox));
+    root_overlay.set_child(Some(&vbox));
+    window.set_child(Some(&root_overlay));
 
     let piano_roll = PianoRollWidget::new();
     piano_roll.set_default_note_beats(config.default_note_beats);
@@ -171,7 +207,11 @@ pub fn build_ui(app: &gtk::Application) {
     });
 
     let player = Rc::new(RefCell::new(
-        match Player::new(&config.soundfont_path, &config.clap_plugin_path) {
+        match Player::new(
+            &config.soundfont_path,
+            &config.clap_plugin_path,
+            initial_gain as f32,
+        ) {
             Ok(p) => Some(p),
             Err(e) => {
                 eprintln!(
@@ -182,6 +222,187 @@ pub fn build_ui(app: &gtk::Application) {
             }
         },
     ));
+
+    let player_gain = player.clone();
+    gain_scale.connect_value_changed(move |scale| {
+        if let Some(p) = &*player_gain.borrow() {
+            p.set_global_gain(scale.value() as f32);
+        }
+    });
+
+    // Physical MIDI input. The manager owns the backend connection while its
+    // event producer feeds the Player's audio-thread queue.
+    let (midi_manager, midi_ui_rx) = if let Some(p) = &*player.borrow() {
+        let (manager, ui_rx) = MidiInputManager::new(p.live_midi_sender());
+        (Some(manager), Some(ui_rx))
+    } else {
+        (None, None)
+    };
+    let midi_manager = Rc::new(RefCell::new(midi_manager));
+
+    let midi_ports = Rc::new(RefCell::new(Vec::<MidiInputPortInfo>::new()));
+    match MidiInputManager::port_infos() {
+        Ok(ports) => {
+            for port in &ports {
+                midi_input_list.append(&port.name);
+            }
+            *midi_ports.borrow_mut() = ports;
+        }
+        Err(err) => eprintln!("Failed to enumerate MIDI inputs: {err}"),
+    }
+
+    // Keep physical-key highlights on the GTK thread.
+    if let Some(midi_ui_rx) = midi_ui_rx {
+        let pr_midi_visual = piano_roll.clone();
+        glib::timeout_add_local(Duration::from_millis(8), move || {
+            for event in midi_ui_rx.try_iter() {
+                pr_midi_visual.set_external_note_active(event.channel, event.pitch, event.active);
+                if event.active {
+                    pr_midi_visual.put_midi_note_on(
+                        event.channel,
+                        event.pitch,
+                        event.velocity,
+                        event.occurred_at,
+                    );
+                } else {
+                    pr_midi_visual.put_midi_note_off(event.channel, event.pitch, event.occurred_at);
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    let midi_manager_select = midi_manager.clone();
+    let midi_ports_select = midi_ports.clone();
+    let pr_midi_select = piano_roll.clone();
+    let status_midi_select = status_bar.clone();
+    let suppress_midi_selection = Rc::new(Cell::new(false));
+    let suppress_midi_select = suppress_midi_selection.clone();
+    midi_input_dropdown.connect_selected_notify(move |dropdown| {
+        if suppress_midi_select.get() {
+            return;
+        }
+        let selected = dropdown.selected();
+        if selected == gtk::INVALID_LIST_POSITION {
+            return;
+        }
+
+        if selected == 0 {
+            if let Some(manager) = midi_manager_select.borrow_mut().as_mut() {
+                manager.disconnect();
+            }
+            pr_midi_select.clear_external_notes();
+            if let Err(err) = clear_midi_input() {
+                eprintln!("Failed to clear cached MIDI input: {err}");
+            }
+            status_midi_select.set_text("[MIDI] Disconnected");
+            return;
+        }
+
+        let Some(port) = midi_ports_select
+            .borrow()
+            .get(selected as usize - 1)
+            .cloned()
+        else {
+            status_midi_select.set_text("[MIDI] Selected input is no longer available");
+            return;
+        };
+
+        let mut manager_ref = midi_manager_select.borrow_mut();
+        let Some(manager) = manager_ref.as_mut() else {
+            status_midi_select.set_text("[MIDI] Audio engine unavailable");
+            return;
+        };
+
+        match manager.connect(&port.id) {
+            Ok(name) => {
+                if let Err(err) = save_midi_input(&CachedMidiInput {
+                    port_id: port.id,
+                    port_name: port.name,
+                }) {
+                    eprintln!("Failed to cache MIDI input: {err}");
+                }
+                status_midi_select.set_text(&format!("[MIDI] Connected: {name}"));
+            }
+            Err(err) => {
+                pr_midi_select.clear_external_notes();
+                status_midi_select.set_text(&format!("[MIDI] Connection failed: {err}"));
+                eprintln!("Failed to connect MIDI input: {err}");
+            }
+        }
+    });
+
+    match load_midi_input() {
+        Ok(Some(cached)) => {
+            let selected = cached_midi_port_position(&midi_ports.borrow(), &cached);
+            if let Some(selected) = selected {
+                midi_input_dropdown.set_selected(selected);
+            } else {
+                status_bar.set_text(&format!(
+                    "[MIDI] Last input unavailable: {}",
+                    cached.port_name
+                ));
+            }
+        }
+        Ok(None) => {}
+        Err(err) => eprintln!("Failed to load cached MIDI input: {err}"),
+    }
+
+    let midi_manager_refresh = midi_manager.clone();
+    let midi_ports_refresh = midi_ports.clone();
+    let midi_list_refresh = midi_input_list.clone();
+    let midi_dropdown_refresh = midi_input_dropdown.clone();
+    let pr_midi_refresh = piano_roll.clone();
+    let status_midi_refresh = status_bar.clone();
+    let suppress_midi_refresh = suppress_midi_selection.clone();
+    midi_refresh_btn.connect_clicked(move |_| {
+        if let Some(manager) = midi_manager_refresh.borrow_mut().as_mut() {
+            manager.disconnect();
+        }
+        pr_midi_refresh.clear_external_notes();
+        suppress_midi_refresh.set(true);
+        midi_dropdown_refresh.set_selected(0);
+        midi_list_refresh.splice(0, midi_list_refresh.n_items(), &["No MIDI Input"]);
+        match MidiInputManager::port_infos() {
+            Ok(ports) => {
+                for port in &ports {
+                    midi_list_refresh.append(&port.name);
+                }
+                let port_count = ports.len();
+                *midi_ports_refresh.borrow_mut() = ports;
+                suppress_midi_refresh.set(false);
+
+                let mut cache_status_set = false;
+                match load_midi_input() {
+                    Ok(Some(cached)) => {
+                        let selected =
+                            cached_midi_port_position(&midi_ports_refresh.borrow(), &cached);
+                        if let Some(selected) = selected {
+                            midi_dropdown_refresh.set_selected(selected);
+                            cache_status_set = true;
+                        } else {
+                            status_midi_refresh.set_text(&format!(
+                                "[MIDI] Last input unavailable: {}",
+                                cached.port_name
+                            ));
+                            cache_status_set = true;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => eprintln!("Failed to load cached MIDI input: {err}"),
+                }
+                if !cache_status_set {
+                    status_midi_refresh
+                        .set_text(&format!("[MIDI] Found {port_count} input device(s)"));
+                }
+            }
+            Err(err) => {
+                suppress_midi_refresh.set(false);
+                status_midi_refresh.set_text(&format!("[MIDI] Refresh failed: {err}"));
+                eprintln!("Failed to refresh MIDI inputs: {err}");
+            }
+        }
+    });
 
     let current_midi_path = Rc::new(RefCell::new(None::<String>));
     let is_playing = Rc::new(RefCell::new(false));
@@ -339,10 +560,15 @@ pub fn build_ui(app: &gtk::Application) {
     });
 
     let pr_track = piano_roll.clone();
+    let midi_manager_track = midi_manager.clone();
     track_dropdown.connect_selected_notify(move |dd| {
         let selected = dd.selected();
         if selected != gtk::INVALID_LIST_POSITION {
             pr_track.set_active_track(selected as usize);
+            let synth_index = pr_track.track_synth_index(selected as usize);
+            if let Some(manager) = midi_manager_track.borrow().as_ref() {
+                manager.set_target_synth(synth_index);
+            }
         }
     });
 
@@ -351,6 +577,19 @@ pub fn build_ui(app: &gtk::Application) {
     let is_playing_key = is_playing.clone();
     let pr_key = piano_roll.clone();
     key_ctrl.connect_key_pressed(move |_, keyval, _, _| {
+        if (keyval == gtk::gdk::Key::l || keyval == gtk::gdk::Key::L)
+            && pr_key.toggle_put_length_quantization()
+        {
+            pr_key.grab_focus();
+            return glib::Propagation::Stop;
+        }
+        if keyval == gtk::gdk::Key::p || keyval == gtk::gdk::Key::P {
+            if pr_key.is_normal_mode() {
+                pr_key.enter_put_mode();
+                pr_key.grab_focus();
+                return glib::Propagation::Stop;
+            }
+        }
         if keyval == gtk::gdk::Key::space {
             let mut playing = is_playing_key.borrow_mut();
             if let Some(p) = &*player_key.borrow() {
@@ -392,12 +631,17 @@ pub fn build_ui(app: &gtk::Application) {
         if *is_playing_timer.borrow() {
             if let Some(p) = &*player_timer.borrow() {
                 if p.is_playing() {
-                    let time = p.get_time();
+                    let track_index = pr_timer.active_track_index();
+                    let (time, active_pitches) = p.playback_snapshot(track_index);
                     pr_timer.set_playhead(time);
+                    pr_timer.set_playback_active_pitches(active_pitches);
                 } else {
                     *is_playing_timer.borrow_mut() = false;
+                    pr_timer.set_playback_active_pitches([]);
                 }
             }
+        } else {
+            pr_timer.set_playback_active_pitches([]);
         }
         glib::ControlFlow::Continue
     });
@@ -458,7 +702,11 @@ pub fn build_ui(app: &gtk::Application) {
 
     // Gracefully shut down audio on window close to avoid pop/click.
     let player_shutdown = player.clone();
+    let midi_manager_shutdown = midi_manager.clone();
     window.connect_close_request(move |_| {
+        if let Some(manager) = midi_manager_shutdown.borrow_mut().as_mut() {
+            manager.disconnect();
+        }
         if let Some(p) = &mut *player_shutdown.borrow_mut() {
             // Close any open plugin GUIs before shutting down audio.
             for i in 0..p.gui_handle_count() {
@@ -481,4 +729,35 @@ pub fn build_ui(app: &gtk::Application) {
     });
 
     window.present();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_midi_port_prefers_id_and_falls_back_to_name() {
+        let ports = vec![
+            MidiInputPortInfo {
+                id: "20:0".into(),
+                name: "TINY MIDI 1".into(),
+            },
+            MidiInputPortInfo {
+                id: "24:0".into(),
+                name: "Other Keyboard".into(),
+            },
+        ];
+
+        let exact_id = CachedMidiInput {
+            port_id: "24:0".into(),
+            port_name: "outdated name".into(),
+        };
+        assert_eq!(cached_midi_port_position(&ports, &exact_id), Some(2));
+
+        let changed_id = CachedMidiInput {
+            port_id: "99:0".into(),
+            port_name: "TINY MIDI 1".into(),
+        };
+        assert_eq!(cached_midi_port_position(&ports, &changed_id), Some(1));
+    }
 }

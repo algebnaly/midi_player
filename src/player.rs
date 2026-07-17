@@ -13,11 +13,14 @@
 use crate::audio_engine::AudioEngine;
 use crate::clap_host::{ClapPluginGuiHandle, ClapPluginWrapper};
 use crate::midi::MidiData;
+use crate::midi_input::{LiveMidiEvent, LiveNoteKey};
 use crate::sequencer::CustomSequencer;
 use crate::synth::TrackSynth;
+use crossbeam_channel::{Sender, unbounded};
 use oxisynth::{SoundFont, Synth};
+use std::collections::HashMap;
 use std::fs::File;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Top-level playback controller.
@@ -33,11 +36,17 @@ pub struct Player {
     _engine: AudioEngine,
     /// Whether playback is currently paused.
     paused: Arc<AtomicBool>,
+    /// Master output gain, stored as raw `f32` bits for lock-free audio access.
+    global_gain: Arc<AtomicU32>,
     /// Set by the audio callback after it outputs a block while paused.
     /// Used by [`shutdown`](Self::shutdown) to confirm silence was flushed.
     silence_flushed: Arc<AtomicBool>,
     /// A snapshot of the currently loaded MIDI data (for hot-swap).
     current_midi: Arc<Mutex<Option<MidiData>>>,
+    /// Producer endpoint used by physical MIDI input callbacks.
+    live_midi_tx: Sender<LiveMidiEvent>,
+    /// Live notes currently owned by the physical input, updated by audio.
+    live_notes: Arc<Mutex<HashMap<LiveNoteKey, u8>>>,
     /// Main-thread GUI handles for CLAP plugins.  Indexed by track.
     /// `None` for SoundFont tracks.
     clap_gui_handles: Vec<Option<ClapPluginGuiHandle>>,
@@ -52,10 +61,13 @@ impl Player {
     /// A CLAP plugin is optionally loaded from `clap_path` if the file
     /// exists.  If neither a SoundFont nor a CLAP plugin can be loaded the
     /// player will still start, but no audio will be produced.
-    pub fn new(sf2_path: &str, clap_path: &str) -> anyhow::Result<Self> {
+    pub fn new(sf2_path: &str, clap_path: &str, global_gain: f32) -> anyhow::Result<Self> {
         let font = Self::load_soundfont(sf2_path)?;
 
         let mut main_synth = Synth::default();
+        // Use unity gain inside each backend; the post-mix master gain is the
+        // single source of truth for application volume.
+        main_synth.set_gain(1.0);
         // Sample rate will be set after audio engine negotiation, but we need
         // a reasonable default for the SoundFont synth.  The actual rate is
         // overwritten below.
@@ -81,19 +93,29 @@ impl Player {
         let preview_synth = {
             let font2 = Self::load_soundfont(sf2_path)?;
             let mut s = Synth::default();
+            s.set_gain(1.0);
             s.set_sample_rate(44100.0);
             s.add_font(font2, true);
             Arc::new(Mutex::new(s))
         };
 
-        let paused = Arc::new(AtomicBool::new(false));
+        // No sequence is playing yet. Starting paused makes the first Play
+        // follow the same data-sync-and-resume path as later playback, thereby
+        // preserving a playhead position chosen before the first run.
+        let paused = Arc::new(AtomicBool::new(true));
+        let global_gain = Arc::new(AtomicU32::new(global_gain.clamp(0.0, 2.0).to_bits()));
         let silence_flushed = Arc::new(AtomicBool::new(false));
+        let (live_midi_tx, live_midi_rx) = unbounded();
+        let live_notes = Arc::new(Mutex::new(HashMap::new()));
 
         let engine = AudioEngine::new(
             sequencer.clone(),
             synths.clone(),
             preview_synth,
+            live_midi_rx,
+            live_notes.clone(),
             paused.clone(),
+            global_gain.clone(),
             silence_flushed.clone(),
         )?;
 
@@ -113,8 +135,11 @@ impl Player {
             synths,
             _engine: engine,
             paused,
+            global_gain,
             silence_flushed,
             current_midi: Arc::new(Mutex::new(None)),
+            live_midi_tx,
+            live_notes,
             clap_gui_handles: gui_handles,
             sample_rate,
         })
@@ -129,12 +154,13 @@ impl Player {
         let bpm = data.get_bpm();
         *self.current_midi.lock().unwrap() = Some(data.clone());
         let mut seq = self.sequencer.lock().unwrap();
+        let mut s_vec = self.synths.lock().unwrap();
+        let live_notes = self.live_notes.lock().unwrap();
+        seq.silence_sequence_notes(&mut s_vec, &live_notes);
         seq.load(&data);
         // Propagate BPM to CLAP plugins so their transport matches.
-        if let Ok(mut s_vec) = self.synths.lock() {
-            for synth in s_vec.iter_mut() {
-                synth.set_tempo(bpm);
-            }
+        for synth in s_vec.iter_mut() {
+            synth.set_tempo(bpm);
         }
         self.paused.store(false, Ordering::SeqCst);
         Ok(())
@@ -143,10 +169,12 @@ impl Player {
     /// Pause playback and silence all notes.
     pub fn pause(&self) {
         self.paused.store(true, Ordering::SeqCst);
-        if let Ok(mut s_vec) = self.synths.lock() {
-            for synth in s_vec.iter_mut() {
-                synth.all_notes_off();
-            }
+        if let (Ok(mut seq), Ok(mut s_vec), Ok(live_notes)) = (
+            self.sequencer.lock(),
+            self.synths.lock(),
+            self.live_notes.lock(),
+        ) {
+            seq.silence_sequence_notes(&mut s_vec, &live_notes);
         }
     }
 
@@ -160,17 +188,21 @@ impl Player {
         self.paused.load(Ordering::SeqCst)
     }
 
+    /// Set the post-mix master gain used by every audio source.
+    pub fn set_global_gain(&self, gain: f32) {
+        self.global_gain
+            .store(gain.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    }
+
     /// Stop playback, reset the sequencer, and silence all notes.
     #[allow(dead_code)]
     pub fn stop(&self) {
         let mut seq = self.sequencer.lock().unwrap();
+        let mut s_vec = self.synths.lock().unwrap();
+        let live_notes = self.live_notes.lock().unwrap();
+        seq.silence_sequence_notes(&mut s_vec, &live_notes);
         seq.reset();
         self.paused.store(true, Ordering::SeqCst);
-        if let Ok(mut s_vec) = self.synths.lock() {
-            for synth in s_vec.iter_mut() {
-                synth.all_notes_off();
-            }
-        }
     }
 
     /// Gracefully shut down audio before the player is dropped.
@@ -204,7 +236,8 @@ impl Player {
     pub fn seek(&self, time: f64) {
         let mut seq = self.sequencer.lock().unwrap();
         let mut s_vec = self.synths.lock().unwrap();
-        seq.seek(time, &mut s_vec);
+        let live_notes = self.live_notes.lock().unwrap();
+        seq.seek(time, &mut s_vec, &live_notes);
     }
 
     /// Replace the current MIDI data and seek to `time` without interrupting
@@ -217,8 +250,9 @@ impl Player {
         let bpm = data.get_bpm();
         let mut seq = self.sequencer.lock().unwrap();
         let mut s_vec = self.synths.lock().unwrap();
+        let live_notes = self.live_notes.lock().unwrap();
         seq.load_for_hot_swap(&data);
-        seq.seek(time, &mut s_vec);
+        seq.seek(time, &mut s_vec, &live_notes);
         // Propagate BPM to CLAP plugins.
         for synth in s_vec.iter_mut() {
             synth.set_tempo(bpm);
@@ -235,6 +269,12 @@ impl Player {
     pub fn get_time(&self) -> f64 {
         let seq = self.sequencer.lock().unwrap();
         seq.playhead_time
+    }
+
+    /// Snapshot the playhead and sounding pitches for the visible MIDI track.
+    pub fn playback_snapshot(&self, track_index: usize) -> (f64, Vec<u8>) {
+        let seq = self.sequencer.lock().unwrap();
+        (seq.playhead_time, seq.active_pitches_for_track(track_index))
     }
 
     /// Returns `true` if the player is actively producing audio.
@@ -256,6 +296,11 @@ impl Player {
             .enumerate()
             .map(|(i, s)| format!("Track {} ({})", i, s.backend_label()))
             .collect()
+    }
+
+    /// Clone the producer endpoint used by a physical MIDI input connection.
+    pub fn live_midi_sender(&self) -> Sender<LiveMidiEvent> {
+        self.live_midi_tx.clone()
     }
 
     // ------------------------------------------------------------------
