@@ -12,7 +12,7 @@
 
 use crate::audio_engine::AudioEngine;
 use crate::clap_host::{ClapPluginGuiHandle, ClapPluginWrapper};
-use crate::midi::MidiData;
+use crate::midi::{MidiData, TrackId};
 use crate::midi_input::{LiveMidiEvent, LiveNoteKey};
 use crate::sequencer::CustomSequencer;
 use crate::synth::TrackSynth;
@@ -46,7 +46,7 @@ pub struct Player {
     /// Producer endpoint used by physical MIDI input callbacks.
     live_midi_tx: Sender<LiveMidiEvent>,
     /// Live notes currently owned by the physical input, updated by audio.
-    live_notes: Arc<Mutex<HashMap<LiveNoteKey, u8>>>,
+    live_notes: Arc<Mutex<HashMap<LiveNoteKey, (usize, u8)>>>,
     /// Main-thread GUI handles for CLAP plugins.  Indexed by track.
     /// `None` for SoundFont tracks.
     clap_gui_handles: Vec<Option<ClapPluginGuiHandle>>,
@@ -272,9 +272,9 @@ impl Player {
     }
 
     /// Snapshot the playhead and sounding pitches for the visible MIDI track.
-    pub fn playback_snapshot(&self, track_index: usize) -> (f64, Vec<u8>) {
+    pub fn playback_snapshot(&self, track_id: TrackId) -> (f64, Vec<u8>) {
         let seq = self.sequencer.lock().unwrap();
-        (seq.playhead_time, seq.active_pitches_for_track(track_index))
+        (seq.playhead_time, seq.active_pitches_for_track(track_id))
     }
 
     /// Returns `true` if the player is actively producing audio.

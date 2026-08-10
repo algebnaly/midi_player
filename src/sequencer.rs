@@ -12,8 +12,8 @@
 //! Looping is always enabled: the loop region spans from time 0 to the end of
 //! the last bar that contains notes (rounded up to a full bar boundary).
 
-use crate::midi::{MidiData, TimedEvent};
-use crate::midi_input::LiveNoteKey;
+use crate::midi::{MidiData, TimedEvent, TrackId};
+use crate::midi_input::{LiveNoteKey, OutputNoteKey};
 use crate::synth::TrackSynth;
 use std::collections::{HashMap, HashSet};
 
@@ -24,8 +24,8 @@ const BEATS_PER_BAR: u64 = 4;
 /// At 48 kHz this is ~4.8 samples.
 const EVENT_DISPATCH_TOLERANCE_SECS: f64 = 0.0001;
 
-/// Key identifying a single note voice: (track_index, channel, pitch).
-type NoteKey = (usize, u8, u8);
+/// Key identifying a single note voice: (stable track ID, channel, pitch).
+type NoteKey = (TrackId, u8, u8);
 
 /// Sample-accurate MIDI event sequencer with automatic looping.
 ///
@@ -117,7 +117,7 @@ impl CustomSequencer {
         &mut self,
         time: f64,
         synths: &mut [TrackSynth],
-        live_notes: &HashMap<LiveNoteKey, u8>,
+        live_notes: &HashMap<LiveNoteKey, (usize, u8)>,
     ) {
         self.playhead_time = time;
 
@@ -132,12 +132,12 @@ impl CustomSequencer {
             match &ev.event_type {
                 crate::midi::MidiEventType::NoteOn { pitch, velocity } => {
                     target_active.insert(
-                        (ev.track_index, ev.channel, *pitch),
+                        (ev.track_id, ev.channel, *pitch),
                         (ev.synth_index, *velocity),
                     );
                 }
                 crate::midi::MidiEventType::NoteOff { pitch } => {
-                    target_active.remove(&(ev.track_index, ev.channel, *pitch));
+                    target_active.remove(&(ev.track_id, ev.channel, *pitch));
                 }
             }
             self.current_event_idx += 1;
@@ -149,7 +149,7 @@ impl CustomSequencer {
         // Only release an output voice if neither the target sequence state nor
         // the live MIDI keyboard still owns it.
         for &(synth_index, channel, pitch) in old_outputs.difference(&target_outputs) {
-            if !live_notes.contains_key(&(synth_index, channel, pitch)) {
+            if !live_owns_output(live_notes, (synth_index, channel, pitch)) {
                 send_to_synth(
                     synths,
                     synth_index,
@@ -161,7 +161,7 @@ impl CustomSequencer {
 
         // Likewise, do not re-trigger a voice already held by the live input.
         for &(synth_index, channel, pitch) in target_outputs.difference(&old_outputs) {
-            if !live_notes.contains_key(&(synth_index, channel, pitch)) {
+            if !live_owns_output(live_notes, (synth_index, channel, pitch)) {
                 let velocity = target_active
                     .iter()
                     .find_map(|((_, ch, p), (synth, velocity))| {
@@ -190,7 +190,7 @@ impl CustomSequencer {
     pub fn render_block(
         &mut self,
         synths: &mut [TrackSynth],
-        live_notes: &HashMap<LiveNoteKey, u8>,
+        live_notes: &HashMap<LiveNoteKey, (usize, u8)>,
         left: &mut [f32],
         right: &mut [f32],
         sample_rate: f64,
@@ -212,7 +212,7 @@ impl CustomSequencer {
                 if ev.time_seconds <= self.playhead_time + EVENT_DISPATCH_TOLERANCE_SECS {
                     // Update active_notes tracking.
                     let key: NoteKey = (
-                        ev.track_index,
+                        ev.track_id,
                         ev.channel,
                         match &ev.event_type {
                             crate::midi::MidiEventType::NoteOn { pitch, .. } => *pitch,
@@ -223,7 +223,7 @@ impl CustomSequencer {
                         crate::midi::MidiEventType::NoteOn { velocity, .. } => {
                             let output_key = (ev.synth_index, ev.channel, key.2);
                             let already_sounding = self.is_note_active(output_key)
-                                || live_notes.contains_key(&output_key);
+                                || live_owns_output(live_notes, output_key);
                             self.active_notes.insert(key, (ev.synth_index, *velocity));
                             if !already_sounding {
                                 send_to_synth(synths, ev.synth_index, ev.channel, &ev.event_type);
@@ -233,7 +233,7 @@ impl CustomSequencer {
                             self.active_notes.remove(&key);
                             let output_key = (ev.synth_index, ev.channel, key.2);
                             if !self.is_note_active(output_key)
-                                && !live_notes.contains_key(&output_key)
+                                && !live_owns_output(live_notes, output_key)
                             {
                                 send_to_synth(synths, ev.synth_index, ev.channel, &ev.event_type);
                             }
@@ -315,7 +315,7 @@ impl CustomSequencer {
     }
 
     /// Return whether the sequencer currently owns this output voice.
-    pub fn is_note_active(&self, output_key: LiveNoteKey) -> bool {
+    pub fn is_note_active(&self, output_key: OutputNoteKey) -> bool {
         self.active_notes
             .iter()
             .any(|((_, channel, pitch), (synth_index, _))| {
@@ -324,11 +324,11 @@ impl CustomSequencer {
     }
 
     /// Return the distinct pitches currently sounding on one MIDI track.
-    pub fn active_pitches_for_track(&self, track_index: usize) -> Vec<u8> {
+    pub fn active_pitches_for_track(&self, track_id: TrackId) -> Vec<u8> {
         let mut pitches: Vec<u8> = self
             .active_notes
             .keys()
-            .filter_map(|(track, _, pitch)| (*track == track_index).then_some(*pitch))
+            .filter_map(|(track, _, pitch)| (*track == track_id).then_some(*pitch))
             .collect();
         pitches.sort_unstable();
         pitches.dedup();
@@ -339,10 +339,10 @@ impl CustomSequencer {
     pub fn silence_sequence_notes(
         &mut self,
         synths: &mut [TrackSynth],
-        live_notes: &HashMap<LiveNoteKey, u8>,
+        live_notes: &HashMap<LiveNoteKey, (usize, u8)>,
     ) {
         for (synth_index, channel, pitch) in output_note_set(&self.active_notes) {
-            if !live_notes.contains_key(&(synth_index, channel, pitch)) {
+            if !live_owns_output(live_notes, (synth_index, channel, pitch)) {
                 send_to_synth(
                     synths,
                     synth_index,
@@ -390,11 +390,22 @@ impl CustomSequencer {
     }
 }
 
-fn output_note_set(notes: &HashMap<NoteKey, (usize, u8)>) -> HashSet<LiveNoteKey> {
+fn output_note_set(notes: &HashMap<NoteKey, (usize, u8)>) -> HashSet<OutputNoteKey> {
     notes
         .iter()
         .map(|((_, channel, pitch), (synth_index, _))| (*synth_index, *channel, *pitch))
         .collect()
+}
+
+fn live_owns_output(
+    live_notes: &HashMap<LiveNoteKey, (usize, u8)>,
+    output_key: OutputNoteKey,
+) -> bool {
+    live_notes
+        .iter()
+        .any(|((_, channel, pitch), (synth_index, _))| {
+            (*synth_index, *channel, *pitch) == output_key
+        })
 }
 
 fn send_to_synth(
@@ -418,13 +429,20 @@ mod tests {
     #[test]
     fn active_pitches_are_distinct_and_filtered_by_track() {
         let mut sequencer = CustomSequencer::new();
-        sequencer.active_notes.insert((0, 0, 60), (0, 90));
-        sequencer.active_notes.insert((0, 1, 60), (0, 80));
-        sequencer.active_notes.insert((0, 0, 64), (0, 100));
-        sequencer.active_notes.insert((1, 0, 67), (0, 100));
+        sequencer.active_notes.insert((TrackId(10), 0, 60), (0, 90));
+        sequencer.active_notes.insert((TrackId(10), 1, 60), (0, 80));
+        sequencer
+            .active_notes
+            .insert((TrackId(10), 0, 64), (0, 100));
+        sequencer
+            .active_notes
+            .insert((TrackId(20), 0, 67), (0, 100));
 
-        assert_eq!(sequencer.active_pitches_for_track(0), vec![60, 64]);
-        assert_eq!(sequencer.active_pitches_for_track(1), vec![67]);
-        assert!(sequencer.active_pitches_for_track(2).is_empty());
+        assert_eq!(
+            sequencer.active_pitches_for_track(TrackId(10)),
+            vec![60, 64]
+        );
+        assert_eq!(sequencer.active_pitches_for_track(TrackId(20)), vec![67]);
+        assert!(sequencer.active_pitches_for_track(TrackId(30)).is_empty());
     }
 }

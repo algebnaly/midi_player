@@ -19,7 +19,7 @@ mod renderer;
 pub mod types;
 mod viewport;
 
-use crate::midi::{MidiData, Note};
+use crate::midi::{MidiData, Note, TrackId};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene};
@@ -269,6 +269,17 @@ impl PianoRollWidget {
         self.queue_draw();
     }
 
+    pub fn update_data_and_notify(&self, midi: MidiData) {
+        self.update_data(midi);
+        self.notify_data_changed();
+    }
+
+    pub fn notify_data_changed(&self) {
+        if let Some(callback) = &*self.imp().data_changed_callback.borrow() {
+            callback();
+        }
+    }
+
     pub fn get_data_clone(&self) -> Option<MidiData> {
         self.imp().data.borrow().clone()
     }
@@ -325,6 +336,16 @@ impl PianoRollWidget {
 
     pub fn active_track_index(&self) -> usize {
         *self.imp().active_track.borrow()
+    }
+
+    pub fn active_track_id(&self) -> Option<TrackId> {
+        let index = self.active_track_index();
+        self.imp()
+            .data
+            .borrow()
+            .as_ref()
+            .and_then(|midi| midi.tracks.get(index))
+            .map(|track| track.id)
     }
 
     pub fn track_synth_index(&self, track_idx: usize) -> usize {
@@ -393,11 +414,17 @@ impl PianoRollWidget {
         let playhead_tick = self.get_playhead_tick().max(0.0).floor() as u64;
         let active_track = *imp.active_track.borrow();
         let length_quantization_enabled = *imp.put_length_quantization_enabled.borrow();
-        let pending = if let Some(midi) = &mut *imp.data.borrow_mut()
-            && let Some(track) = midi.tracks.get_mut(active_track)
-        {
+        let pending = if let Some(midi) = &mut *imp.data.borrow_mut() {
+            let target_track = midi
+                .tracks
+                .iter()
+                .position(|track| track.input.armed)
+                .unwrap_or(active_track);
             let start_tick = snap_tick_to_beat(playhead_tick, midi.ticks_per_beat);
             let duration = u64::from(midi.ticks_per_beat).max(1);
+            let Some(track) = midi.tracks.get_mut(target_track) else {
+                return false;
+            };
             track.notes.push(Note {
                 pitch,
                 velocity,
@@ -406,7 +433,7 @@ impl PianoRollWidget {
                 channel,
             });
             Some(PendingPutNote {
-                track_index: active_track,
+                track_index: target_track,
                 note_index: track.notes.len() - 1,
                 start_tick,
                 pitch,

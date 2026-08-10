@@ -26,8 +26,10 @@ mod midi;
 mod midi_input;
 mod piano_roll;
 mod player;
+mod project;
 mod sequencer;
 mod synth;
+mod velocity_curve;
 mod window;
 
 use gtk::Application;

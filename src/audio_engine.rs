@@ -42,7 +42,7 @@ impl AudioEngine {
         synths: Arc<Mutex<Vec<TrackSynth>>>,
         preview_synth: Arc<Mutex<Synth>>,
         live_midi_rx: Receiver<LiveMidiEvent>,
-        live_notes: Arc<Mutex<HashMap<LiveNoteKey, u8>>>,
+        live_notes: Arc<Mutex<HashMap<LiveNoteKey, (usize, u8)>>>,
         paused: Arc<AtomicBool>,
         global_gain: Arc<AtomicU32>,
         silence_flushed: Arc<AtomicBool>,
@@ -201,7 +201,7 @@ impl AudioEngine {
 
 fn drain_live_midi(
     receiver: &Receiver<LiveMidiEvent>,
-    live_notes: &mut HashMap<LiveNoteKey, u8>,
+    live_notes: &mut HashMap<LiveNoteKey, (usize, u8)>,
     sequencer: &CustomSequencer,
     synths: &mut [TrackSynth],
 ) {
@@ -214,22 +214,40 @@ fn drain_live_midi(
                 velocity,
                 ..
             } => {
+                let output_key = event.output_key();
                 let already_sounding =
-                    live_notes.contains_key(&key) || sequencer.is_note_active(key);
-                live_notes.insert(key, velocity);
+                    live_notes
+                        .iter()
+                        .any(|((_, held_channel, held_pitch), (held_synth, _))| {
+                            (*held_synth, *held_channel, *held_pitch) == output_key
+                        })
+                        || sequencer.is_note_active(output_key);
+                live_notes.insert(key, (output_key.0, velocity));
                 if !already_sounding {
                     send_live_event(
                         synths,
-                        key.0,
+                        output_key.0,
                         channel,
                         &MidiEventType::NoteOn { pitch, velocity },
                     );
                 }
             }
             LiveMidiEvent::NoteOff { channel, pitch, .. } => {
+                let output_key = event.output_key();
                 let was_live = live_notes.remove(&key).is_some();
-                if was_live && !sequencer.is_note_active(key) {
-                    send_live_event(synths, key.0, channel, &MidiEventType::NoteOff { pitch });
+                let another_live_owner =
+                    live_notes
+                        .iter()
+                        .any(|((_, held_channel, held_pitch), (held_synth, _))| {
+                            (*held_synth, *held_channel, *held_pitch) == output_key
+                        });
+                if was_live && !another_live_owner && !sequencer.is_note_active(output_key) {
+                    send_live_event(
+                        synths,
+                        output_key.0,
+                        channel,
+                        &MidiEventType::NoteOff { pitch },
+                    );
                 }
             }
         }

@@ -17,9 +17,15 @@
 
 use anyhow::Result;
 use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind};
+use serde::{Deserialize, Serialize};
 use std::fs;
 
-#[derive(Debug, Clone)]
+/// Stable identity of a MIDI track. Unlike its vector index, this value does
+/// not change when tracks are reordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TrackId(pub u64);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Note {
     pub pitch: u8,
     pub velocity: u8,
@@ -28,18 +34,48 @@ pub struct Note {
     pub channel: u8,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TrackMixerSettings {
+    pub mute: bool,
+    pub solo: bool,
+    pub volume_db: f32,
+    pub pan: f32,
+}
+
+impl Default for TrackMixerSettings {
+    fn default() -> Self {
+        Self {
+            mute: false,
+            solo: false,
+            volume_db: 0.0,
+            pan: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TrackInputSettings {
+    pub armed: bool,
+    pub channel_filter: Option<u8>,
+    pub transpose: i8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackData {
+    pub id: TrackId,
     pub name: String,
     pub notes: Vec<Note>,
     pub synth_index: usize,
+    pub mixer: TrackMixerSettings,
+    pub input: TrackInputSettings,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MidiData {
     pub tracks: Vec<TrackData>,
     pub ticks_per_beat: u16,
     pub tempo_map: Vec<(u64, u32)>,
+    next_track_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -52,7 +88,7 @@ pub enum MidiEventType {
 pub struct TimedEvent {
     pub time_seconds: f64,
     pub channel: u8,
-    pub track_index: usize,
+    pub track_id: TrackId,
     pub synth_index: usize,
     pub event_type: MidiEventType,
 }
@@ -62,25 +98,102 @@ impl MidiData {
         let mut tracks = Vec::new();
         if track_names.is_empty() {
             tracks.push(TrackData {
+                id: TrackId(1),
                 name: "Track 0".to_string(),
                 notes: Vec::new(),
                 synth_index: 0,
+                mixer: TrackMixerSettings::default(),
+                input: TrackInputSettings::default(),
             });
         } else {
             for (synth_index, name) in track_names.iter().enumerate() {
                 tracks.push(TrackData {
+                    id: TrackId(synth_index as u64 + 1),
                     name: name.clone(),
                     notes: Vec::new(),
                     synth_index,
+                    mixer: TrackMixerSettings::default(),
+                    input: TrackInputSettings::default(),
                 });
             }
         }
 
+        let next_track_id = tracks.len() as u64 + 1;
         MidiData {
             tracks,
             ticks_per_beat: 480,
             tempo_map: vec![(0, 500_000)],
+            next_track_id,
         }
+    }
+
+    pub fn track_index(&self, track_id: TrackId) -> Option<usize> {
+        self.tracks.iter().position(|track| track.id == track_id)
+    }
+
+    pub fn add_track(&mut self, name: String, synth_index: usize) -> TrackId {
+        let id = TrackId(self.next_track_id);
+        self.next_track_id += 1;
+        self.tracks.push(TrackData {
+            id,
+            name,
+            notes: Vec::new(),
+            synth_index,
+            mixer: TrackMixerSettings::default(),
+            input: TrackInputSettings::default(),
+        });
+        id
+    }
+
+    pub fn duplicate_track(&mut self, track_id: TrackId) -> Option<TrackId> {
+        let source = self
+            .tracks
+            .iter()
+            .find(|track| track.id == track_id)?
+            .clone();
+        let id = TrackId(self.next_track_id);
+        self.next_track_id += 1;
+        let source_index = self.track_index(track_id)?;
+        self.tracks.insert(
+            source_index + 1,
+            TrackData {
+                id,
+                name: format!("{} Copy", source.name),
+                notes: source.notes,
+                synth_index: source.synth_index,
+                mixer: source.mixer,
+                input: TrackInputSettings {
+                    armed: false,
+                    ..source.input
+                },
+            },
+        );
+        Some(id)
+    }
+
+    pub fn remove_track(&mut self, track_id: TrackId) -> bool {
+        if self.tracks.len() <= 1 {
+            return false;
+        }
+        let Some(index) = self.track_index(track_id) else {
+            return false;
+        };
+        self.tracks.remove(index);
+        true
+    }
+
+    pub fn move_track(&mut self, track_id: TrackId, new_index: usize) -> bool {
+        let Some(old_index) = self.track_index(track_id) else {
+            return false;
+        };
+        let last_index = self.tracks.len().saturating_sub(1);
+        let new_index = new_index.min(last_index);
+        if old_index == new_index {
+            return false;
+        }
+        let track = self.tracks.remove(old_index);
+        self.tracks.insert(new_index, track);
+        true
     }
 
     pub fn compile_events(&self) -> Vec<TimedEvent> {
@@ -116,7 +229,11 @@ impl MidiData {
             time_sec
         };
 
-        for (track_idx, track) in self.tracks.iter().enumerate() {
+        let has_solo = self.tracks.iter().any(|track| track.mixer.solo);
+        for track in &self.tracks {
+            if !track.is_audible(has_solo) {
+                continue;
+            }
             for note in &track.notes {
                 let start_sec = tick_to_seconds(note.start_tick);
                 let end_sec = tick_to_seconds(note.end_tick);
@@ -124,7 +241,7 @@ impl MidiData {
                 events.push(TimedEvent {
                     time_seconds: start_sec,
                     channel: note.channel,
-                    track_index: track_idx,
+                    track_id: track.id,
                     synth_index: track.synth_index,
                     event_type: MidiEventType::NoteOn {
                         pitch: note.pitch,
@@ -135,7 +252,7 @@ impl MidiData {
                 events.push(TimedEvent {
                     time_seconds: end_sec,
                     channel: note.channel,
-                    track_index: track_idx,
+                    track_id: track.id,
                     synth_index: track.synth_index,
                     event_type: MidiEventType::NoteOff { pitch: note.pitch },
                 });
@@ -233,27 +350,35 @@ impl MidiData {
             notes.sort_by_key(|n| n.start_tick);
             if !notes.is_empty() {
                 tracks.push(TrackData {
+                    id: TrackId(tracks.len() as u64 + 1),
                     name: name.unwrap_or_else(|| format!("Track {}", tracks.len())),
                     notes,
                     synth_index: 0,
+                    mixer: TrackMixerSettings::default(),
+                    input: TrackInputSettings::default(),
                 });
             }
         }
 
         if tracks.is_empty() {
             tracks.push(TrackData {
+                id: TrackId(1),
                 name: "Track 0".to_string(),
                 notes: Vec::new(),
                 synth_index: 0,
+                mixer: TrackMixerSettings::default(),
+                input: TrackInputSettings::default(),
             });
         }
 
         tempo_map.sort_by_key(|t| t.0);
 
+        let next_track_id = tracks.len() as u64 + 1;
         Ok(MidiData {
             tracks,
             ticks_per_beat,
             tempo_map,
+            next_track_id,
         })
     }
 
@@ -270,7 +395,7 @@ impl MidiData {
         self.tempo_map = vec![(0, tempo)];
     }
 
-    pub fn to_smf(&self) -> Smf<'static> {
+    pub fn to_smf(&self) -> Smf<'_> {
         let header = Header {
             format: Format::Parallel,
             timing: Timing::Metrical(midly::num::u15::new(self.ticks_per_beat)),
@@ -297,7 +422,10 @@ impl MidiData {
 
         // Other tracks
         for t in &self.tracks {
-            let mut events = Vec::new();
+            let mut events = vec![TrackEvent {
+                delta: midly::num::u28::new(0),
+                kind: TrackEventKind::Meta(MetaMessage::TrackName(t.name.as_bytes())),
+            }];
 
             // Create absolute note on/off events
             #[derive(Debug, Clone)]
@@ -395,6 +523,12 @@ impl MidiData {
     }
 }
 
+impl TrackData {
+    pub fn is_audible(&self, has_solo: bool) -> bool {
+        !self.mixer.mute && (!has_solo || self.mixer.solo)
+    }
+}
+
 /// Tie-breaker for [`MidiData::compile_events`]: at the same timestamp, NoteOff
 /// must be dispatched before NoteOn (same rule as [`MidiData::to_smf`]).
 fn same_time_event_order(event: &MidiEventType) -> u8 {
@@ -421,12 +555,16 @@ mod tests {
     fn midi_with(notes: Vec<Note>) -> MidiData {
         MidiData {
             tracks: vec![TrackData {
+                id: TrackId(1),
                 name: "t0".into(),
                 notes,
                 synth_index: 0,
+                mixer: TrackMixerSettings::default(),
+                input: TrackInputSettings::default(),
             }],
             ticks_per_beat: 480,
             tempo_map: vec![(0, 500_000)],
+            next_track_id: 2,
         }
     }
 
@@ -454,5 +592,98 @@ mod tests {
         let midi = midi_with(vec![note(60, 0, 480), note(60, 480, 960)]);
         let boundary = boundary_event_kinds(&midi);
         assert_eq!(boundary, &["off", "on"]);
+    }
+
+    #[test]
+    fn track_ids_remain_stable_across_reorder_and_delete() {
+        let mut midi = MidiData::new_empty(&["A".into(), "B".into()]);
+        let a = midi.tracks[0].id;
+        let b = midi.tracks[1].id;
+        let c = midi.add_track("C".into(), 0);
+
+        assert!(midi.move_track(c, 0));
+        assert_eq!(
+            midi.tracks.iter().map(|track| track.id).collect::<Vec<_>>(),
+            vec![c, a, b]
+        );
+        assert!(midi.remove_track(a));
+        assert_eq!(
+            midi.tracks.iter().map(|track| track.id).collect::<Vec<_>>(),
+            vec![c, b]
+        );
+    }
+
+    #[test]
+    fn duplicated_track_gets_a_new_id_and_copies_notes() {
+        let mut midi = midi_with(vec![note(60, 0, 480)]);
+        let original = midi.tracks[0].id;
+        let duplicate = midi.duplicate_track(original).unwrap();
+
+        assert_ne!(duplicate, original);
+        assert_eq!(midi.tracks[1].id, duplicate);
+        assert_eq!(midi.tracks[1].notes.len(), 1);
+        assert_eq!(midi.tracks[1].name, "t0 Copy");
+    }
+
+    #[test]
+    fn compile_events_carry_stable_track_id() {
+        let midi = midi_with(vec![note(60, 0, 480)]);
+        assert!(
+            midi.compile_events()
+                .iter()
+                .all(|event| event.track_id == TrackId(1))
+        );
+    }
+
+    #[test]
+    fn mute_and_solo_filter_compiled_tracks() {
+        let mut midi = MidiData::new_empty(&["A".into(), "B".into(), "C".into()]);
+        for (index, track) in midi.tracks.iter_mut().enumerate() {
+            track.notes.push(note(60 + index as u8, 0, 480));
+        }
+
+        midi.tracks[0].mixer.mute = true;
+        let pitches = midi
+            .compile_events()
+            .into_iter()
+            .filter_map(|event| match event.event_type {
+                MidiEventType::NoteOn { pitch, .. } => Some(pitch),
+                MidiEventType::NoteOff { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pitches, vec![61, 62]);
+
+        midi.tracks[2].mixer.solo = true;
+        let pitches = midi
+            .compile_events()
+            .into_iter()
+            .filter_map(|event| match event.event_type {
+                MidiEventType::NoteOn { pitch, .. } => Some(pitch),
+                MidiEventType::NoteOff { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pitches, vec![62]);
+    }
+
+    #[test]
+    fn exported_format_one_tracks_keep_their_names() {
+        let midi = MidiData::new_empty(&["Piano".into(), "Strings".into()]);
+        let bytes = midi.to_buffer();
+        let parsed = Smf::parse(&bytes).unwrap();
+
+        let names = parsed
+            .tracks
+            .iter()
+            .skip(1)
+            .filter_map(|track| {
+                track.iter().find_map(|event| match event.kind {
+                    TrackEventKind::Meta(MetaMessage::TrackName(name)) => {
+                        Some(String::from_utf8_lossy(name).into_owned())
+                    }
+                    _ => None,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Piano", "Strings"]);
     }
 }
