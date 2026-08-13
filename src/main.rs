@@ -25,9 +25,12 @@ mod config;
 mod midi;
 mod midi_input;
 mod piano_roll;
+mod drum_roll;
+mod roll_stack;
 mod player;
 mod project;
 mod sequencer;
+mod soundbank;
 mod synth;
 mod velocity_curve;
 mod window;
@@ -37,11 +40,19 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let initial_file = args.get(1).cloned();
+
     let app = Application::builder()
         .application_id("com.github.midiplayer")
+        // prevent GTK from trying to parse the file argument
+        .flags(gtk::gio::ApplicationFlags::NON_UNIQUE) 
         .build();
 
-    app.connect_activate(window::build_ui);
+    app.connect_activate(move |app| {
+        window::build_ui(app, initial_file.clone());
+    });
 
-    app.run();
+    app.run_with_args(&[] as &[&str]);
 }
+pub mod drum_map;

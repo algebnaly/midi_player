@@ -78,31 +78,22 @@ pub fn render_notes(
     let height = vp.height as f32;
     let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
 
-    for (t_idx, track) in midi.tracks.iter().enumerate() {
-        let is_active = t_idx == active_track;
+    if let Some(track) = midi.tracks.get(active_track) {
         for (n_idx, note) in track.notes.iter().enumerate() {
             let (x, y, w, h) = vp.note_rect(note, tps);
             let (x, y, w, h) = (x as f32, y as f32, w as f32, h as f32);
 
             if x + w > kw && x < width && y + h > 0.0 && y < height {
                 // Fill
-                let note_color = if is_active {
-                    if selected_notes.contains(&n_idx) {
-                        &theme.note_selected
-                    } else {
-                        &theme.note_active
-                    }
+                let note_color = if selected_notes.contains(&n_idx) {
+                    &theme.note_selected
                 } else {
-                    &theme.note_inactive
+                    &theme.note_active
                 };
                 snapshot.append_color(note_color, &graphene::Rect::new(x, y, w, h));
 
                 // Border
-                let bc = if is_active {
-                    &theme.note_border_active
-                } else {
-                    &theme.note_border_inactive
-                };
+                let bc = &theme.note_border_active;
                 snapshot.append_color(bc, &graphene::Rect::new(x, y, w, 1.0));
                 snapshot.append_color(bc, &graphene::Rect::new(x, y + h - 1.0, w, 1.0));
                 snapshot.append_color(bc, &graphene::Rect::new(x, y, 1.0, h));
@@ -168,3 +159,4 @@ pub fn render_selection_rect(
         snapshot.append_color(bc, &graphene::Rect::new(rx + rw - 1.0, ry, 1.0, rh));
     }
 }
+

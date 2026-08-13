@@ -4,8 +4,7 @@
 //! dimensions.  Every tick↔pixel and pitch↔pixel conversion lives here so that
 //! renderers and input handlers share a single source of truth.
 
-use super::types::{KEY_WIDTH, MIN_NOTE_WIDTH_PX};
-use crate::midi::Note;
+use super::types::KEY_WIDTH;
 
 /// Immutable snapshot of the current viewport parameters.
 #[derive(Debug, Clone)]
@@ -56,49 +55,23 @@ impl Viewport {
         time_sec * self.zoom_x - self.scroll_x + KEY_WIDTH
     }
 
-    // ── Vertical conversions (pitch ↔ screen Y) ───────────────────
 
-    /// Convert a MIDI pitch (0–127) to the screen Y of the *bottom* of its
-    /// grid row.
+    // ── Drum row conversions (row index ↔ screen Y) ────────────
+
+    /// Convert a drum row index to the screen Y of the *top* of its
+    /// grid row. Row 0 is at the bottom of the grid.
+    pub fn drum_row_to_y(&self, row: usize, _total_rows: usize) -> f64 {
+        self.height - ((row as f64 + 1.0) * self.zoom_y) + self.scroll_y
+    }
+
+    /// Convert a screen Y coordinate to a drum row index.
     #[inline]
-    pub fn pitch_to_y(&self, pitch: u8) -> f64 {
-        self.height - (pitch as f64 * self.zoom_y) + self.scroll_y
+    pub fn y_to_drum_row(&self, screen_y: f64, total_rows: usize) -> usize {
+        let dist_from_bottom = self.height - screen_y + self.scroll_y;
+        let row = (dist_from_bottom / self.zoom_y).floor() as i32;
+        row.clamp(0, (total_rows as i32 - 1).max(0)) as usize
     }
 
-    /// Convert a screen Y coordinate to a MIDI pitch (0–127).
-    #[inline]
-    pub fn y_to_pitch(&self, screen_y: f64) -> u8 {
-        let pitch_f = (self.height - screen_y + self.scroll_y) / self.zoom_y;
-        (pitch_f.floor() as i32).clamp(0, 127) as u8
-    }
-
-
-    // ── Note geometry ──────────────────────────────────────────────
-
-    /// Screen rectangle `(x, y, width, height)` for a note.
-    pub fn note_rect(&self, note: &Note, tps: f64) -> (f64, f64, f64, f64) {
-        let x = self.tick_to_x(note.start_tick, tps);
-        let y = self.pitch_to_y(note.pitch) - self.zoom_y;
-        let dur_sec = (note.end_tick - note.start_tick) as f64 / tps;
-        let w = (dur_sec * self.zoom_x).max(MIN_NOTE_WIDTH_PX);
-        let h = self.zoom_y - 1.0;
-        (x, y, w, h)
-    }
-
-    /// Note start X in *absolute* pixel coordinates (time=0 is 0px, no
-    /// KEY_WIDTH, no scroll).
-    #[inline]
-    #[allow(dead_code)]
-    pub fn note_abs_x(&self, note: &Note, tps: f64) -> f64 {
-        (note.start_tick as f64 / tps) * self.zoom_x
-    }
-
-    /// Note width in pixels (independent of scroll).
-    #[inline]
-    #[allow(dead_code)]
-    pub fn note_screen_width(&self, note: &Note, tps: f64) -> f64 {
-        ((note.end_tick - note.start_tick) as f64 / tps) * self.zoom_x
-    }
 
     // ── Visibility helpers ─────────────────────────────────────────
 
@@ -152,16 +125,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pitch_to_y_roundtrip() {
-        let vp = make_vp();
-        for pitch in 0..=127u8 {
-            let y = vp.pitch_to_y(pitch);
-            // Sample a point just inside the cell (above the grid line)
-            let recovered = vp.y_to_pitch(y - 0.5);
-            assert_eq!(recovered, pitch, "pitch roundtrip failed for {pitch}");
-        }
-    }
 
     #[test]
     fn visible_tick_range_at_origin() {

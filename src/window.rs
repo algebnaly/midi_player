@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use crate::app_cache::{CachedMidiInput, clear_midi_input, load_midi_input, save_midi_input};
 use crate::config::AppConfig;
-use crate::midi::{MidiData, TrackId};
+use crate::midi::{MidiData, TrackId, TrackMode};
 use crate::midi_input::{MidiInputManager, MidiInputPortInfo};
-use crate::piano_roll::PianoRollWidget;
+use crate::roll_stack::RollStack;
 use crate::piano_roll::types::EditMode;
 use crate::player::Player;
 use crate::project::{PROJECT_EXTENSION, ProjectFile};
@@ -51,14 +51,67 @@ fn rebuild_track_widgets(
 
     let mut selected_index = 0;
     for (index, track) in midi.tracks.iter().enumerate() {
-        model.append(&track.name);
-        let label = Label::new(Some(&track.name));
+        let display_name = if matches!(&track.mode, TrackMode::Drum(_)) {
+            format!("🥁 {}", track.name)
+        } else {
+            track.name.clone()
+        };
+        model.append(&display_name);
+        
+        let row_box = Box::new(gtk::Orientation::Vertical, 2);
+        row_box.set_margin_top(4);
+        row_box.set_margin_bottom(4);
+        row_box.set_margin_start(4);
+        row_box.set_margin_end(4);
+        
+        let label = Label::new(Some(&display_name));
         label.set_xalign(0.0);
-        label.set_margin_top(7);
-        label.set_margin_bottom(7);
-        label.set_margin_start(8);
-        label.set_margin_end(8);
-        list_box.append(&label);
+        row_box.append(&label);
+        
+        let da = gtk::DrawingArea::new();
+        da.set_size_request(200, 30);
+        da.set_hexpand(true);
+        
+        let notes = track.notes.clone();
+        da.set_draw_func(move |_, cr, width, height| {
+            let w = width as f64;
+            let h = height as f64;
+            
+            // Background
+            cr.set_source_rgba(0.15, 0.15, 0.15, 1.0);
+            cr.rectangle(0.0, 0.0, w, h);
+            let _ = cr.fill();
+            
+            if notes.is_empty() {
+                return;
+            }
+            
+            let max_tick = notes.iter().map(|n| n.end_tick).max().unwrap_or(1) as f64;
+            let min_pitch = notes.iter().map(|n| n.pitch).min().unwrap_or(0) as f64;
+            let max_pitch = notes.iter().map(|n| n.pitch).max().unwrap_or(127) as f64;
+            let pitch_range = (max_pitch - min_pitch).max(24.0); // Show at least 2 octaves range
+            let pitch_padding = pitch_range * 0.1;
+            let range_min = min_pitch - pitch_padding;
+            let range_range = pitch_range + 2.0 * pitch_padding;
+            
+            cr.set_source_rgba(0.2, 0.6, 1.0, 0.8);
+            for note in &notes {
+                let x = (note.start_tick as f64 / max_tick) * w;
+                let note_w = (((note.end_tick - note.start_tick) as f64 / max_tick) * w).max(1.0);
+                
+                // For drums, just draw diamonds or fixed size rectangles
+                let mut y = h - ((note.pitch as f64 - range_min) / range_range) * h;
+                let note_h = (1.0 / range_range) * h;
+                let note_h = note_h.max(2.0);
+                y -= note_h;
+                
+                cr.rectangle(x, y, note_w, note_h);
+                let _ = cr.fill();
+            }
+        });
+        
+        row_box.append(&da);
+        list_box.append(&row_box);
         if track.id == selected_track {
             selected_index = index;
         }
@@ -71,7 +124,7 @@ fn rebuild_track_widgets(
 
 #[allow(clippy::too_many_arguments)]
 fn install_track_data(
-    piano_roll: &PianoRollWidget,
+    piano_roll: &RollStack,
     model: &StringList,
     list_box: &gtk::ListBox,
     dropdown: &DropDown,
@@ -105,9 +158,10 @@ fn install_track_data(
     }
 }
 
-pub fn build_ui(app: &gtk::Application) {
+pub fn build_ui(app: &gtk::Application, initial_file: Option<String>) {
     // Load user configuration
     let config = AppConfig::load();
+    let soundbank_manager = Rc::new(crate::soundbank::SoundbankManager::scan(&config.soundbank_dirs));
     let velocity_curve = VelocityCurve::default();
 
     let window = ApplicationWindow::builder()
@@ -265,6 +319,8 @@ pub fn build_ui(app: &gtk::Application) {
     let track_edit_row = Box::new(gtk::Orientation::Horizontal, 4);
     track_edit_row.append(&rename_track_btn);
     track_edit_row.append(&duplicate_track_btn);
+    let instrument_btn = Button::with_label("Instrument 🎹");
+    track_edit_row.append(&instrument_btn);
     track_panel.append(&track_edit_row);
     let track_action_row = Box::new(gtk::Orientation::Horizontal, 4);
     track_action_row.append(&add_track_btn);
@@ -273,7 +329,7 @@ pub fn build_ui(app: &gtk::Application) {
     track_action_row.append(&move_track_down_btn);
     track_panel.append(&track_action_row);
 
-    let piano_roll = PianoRollWidget::new();
+    let piano_roll = RollStack::new();
     piano_roll.set_default_note_beats(config.default_note_beats);
 
     // Status bar at the bottom — full width, fixed height
@@ -283,7 +339,7 @@ pub fn build_ui(app: &gtk::Application) {
     status_bar.set_vexpand(false);
     status_bar.add_css_class("status-bar");
 
-    vbox.append(&piano_roll);
+    vbox.append(&piano_roll.stack);
     vbox.append(&status_bar);
     root_overlay.add_overlay(&track_panel);
 
@@ -626,7 +682,7 @@ pub fn build_ui(app: &gtk::Application) {
     // Wire status callback
     let status_bar_clone = status_bar.clone();
     piano_roll.connect_status(move |msg| {
-        status_bar_clone.set_text(msg);
+        status_bar_clone.set_text(&msg);
     });
 
     // Wire select mode toggle button
@@ -689,7 +745,9 @@ pub fn build_ui(app: &gtk::Application) {
     let player = Rc::new(RefCell::new(
         match Player::new(
             &config.soundfont_path,
+            &config.drum_soundfont_path,
             &config.clap_plugin_path,
+            &config.sfz_path,
             initial_gain as f32,
         ) {
             Ok(p) => Some(p),
@@ -702,6 +760,10 @@ pub fn build_ui(app: &gtk::Application) {
             }
         },
     ));
+
+    // Drum synth index: if a dedicated drum SF2 was loaded, drum tracks use it.
+    let drum_synth_idx = Rc::new(Cell::new(0));
+    let sfz_synth_idx = Rc::new(Cell::new(0));
 
     let player_gain = player.clone();
     gain_scale.connect_value_changed(move |scale| {
@@ -1005,13 +1067,16 @@ pub fn build_ui(app: &gtk::Application) {
         let Some(mut midi) = pr_add_track.get_data_clone() else {
             return;
         };
-        let synth_index = midi
+        let (synth_index, synth_source) = midi
             .tracks
             .get(pr_add_track.active_track_index())
-            .map(|track| track.synth_index)
-            .unwrap_or(0);
+            .map(|track| (track.synth_index, track.synth_source.clone()))
+            .unwrap_or_else(|| (0, crate::midi::SynthSource::default()));
         let name = format!("Track {}", midi.tracks.len() + 1);
         let new_track = midi.add_track(name, synth_index);
+        if let Some(track) = midi.tracks.last_mut() {
+            track.synth_source = synth_source;
+        }
         install_track_data(
             &pr_add_track,
             &model_add_track,
@@ -1026,6 +1091,124 @@ pub fn build_ui(app: &gtk::Application) {
             new_track,
             true,
         );
+    });
+
+    let instrument_manager = soundbank_manager.clone();
+    let player_instrument = player.clone();
+    let pr_instrument = piano_roll.clone();
+    let model_instrument = track_list.clone();
+    let list_instrument = track_list_box.clone();
+    let dropdown_instrument = track_dropdown.clone();
+    let name_instrument = track_name_entry.clone();
+    let mute_instrument = mute_track_btn.clone();
+    let solo_instrument = solo_track_btn.clone();
+    let arm_instrument = arm_track_btn.clone();
+    let syncing_instrument = syncing_tracks.clone();
+    
+    instrument_btn.connect_clicked(move |_| {
+        let Some(active_track) = pr_instrument.active_track_id() else {
+            return;
+        };
+        
+        let dialog = gtk::Dialog::builder()
+            .title("Select Instrument")
+            .modal(true)
+            .default_width(400)
+            .default_height(500)
+            .build();
+            
+        let content_area = dialog.content_area();
+        let search_entry = gtk::SearchEntry::new();
+        search_entry.set_margin_top(8);
+        search_entry.set_margin_bottom(8);
+        search_entry.set_margin_start(8);
+        search_entry.set_margin_end(8);
+        content_area.append(&search_entry);
+        
+        let scrolled = gtk::ScrolledWindow::new();
+        scrolled.set_vexpand(true);
+        let listbox = gtk::ListBox::new();
+        listbox.set_selection_mode(gtk::SelectionMode::Single);
+        scrolled.set_child(Some(&listbox));
+        content_area.append(&scrolled);
+        
+        for bank in &instrument_manager.banks {
+            let row = gtk::ListBoxRow::new();
+            let label = gtk::Label::new(Some(&bank.name));
+            label.set_halign(gtk::Align::Start);
+            label.set_margin_start(8);
+            label.set_margin_top(8);
+            label.set_margin_bottom(8);
+            row.set_child(Some(&label));
+            listbox.append(&row);
+        }
+        
+        let listbox_filter = listbox.clone();
+        search_entry.connect_search_changed(move |entry| {
+            let text = entry.text().to_lowercase();
+            listbox_filter.set_filter_func(move |row| {
+                if let Some(child) = row.child() {
+                    if let Some(label) = child.downcast_ref::<gtk::Label>() {
+                        return label.text().to_lowercase().contains(&text);
+                    }
+                }
+                true
+            });
+        });
+        
+        let dialog_clone = dialog.clone();
+        let p_inst = player_instrument.clone();
+        let pr_inst = pr_instrument.clone();
+        let manager_clone = instrument_manager.clone();
+        
+        let model_inst = model_instrument.clone();
+        let list_inst = list_instrument.clone();
+        let drop_inst = dropdown_instrument.clone();
+        let name_inst = name_instrument.clone();
+        let mute_inst = mute_instrument.clone();
+        let solo_inst = solo_instrument.clone();
+        let arm_inst = arm_instrument.clone();
+        let sync_inst = syncing_instrument.clone();
+        
+        listbox.connect_row_activated(move |_, row| {
+            if let Some(child) = row.child() {
+                if let Some(label) = child.downcast_ref::<gtk::Label>() {
+                    let text = label.text().to_string();
+                    if let Some(bank) = manager_clone.banks.iter().find(|b| b.name == text) {
+                        if let Some(p) = &mut *p_inst.borrow_mut() {
+                            match p.add_or_get_synth(&bank.source) {
+                                Ok(new_synth_idx) => {
+                                    if let Some(mut midi) = pr_inst.get_data_clone() {
+                                        if let Some(track) = midi.tracks.iter_mut().find(|t| t.id == active_track) {
+                                            track.synth_source = bank.source.clone();
+                                            track.synth_index = new_synth_idx;
+                                        }
+                                        install_track_data(
+                                            &pr_inst,
+                                            &model_inst,
+                                            &list_inst,
+                                            &drop_inst,
+                                            &name_inst,
+                                            &mute_inst,
+                                            &solo_inst,
+                                            &arm_inst,
+                                            &sync_inst,
+                                            midi,
+                                            active_track,
+                                            true,
+                                        );
+                                    }
+                                }
+                                Err(e) => eprintln!("Failed to load synth: {}", e),
+                            }
+                        }
+                    }
+                }
+            }
+            dialog_clone.close();
+        });
+        
+        dialog.present();
     });
 
     let pr_duplicate_track = piano_roll.clone();
@@ -1197,6 +1380,11 @@ pub fn build_ui(app: &gtk::Application) {
     let arm_track_open = arm_track_btn.clone();
     let syncing_tracks_open = syncing_tracks.clone();
     let bpm_spin_open = bpm_spin.clone();
+    let _drum_idx_open = drum_synth_idx.clone();
+    let _sfz_idx_open = sfz_synth_idx.clone();
+    let def_sf2 = config.soundfont_path.clone();
+    let def_drum_sf2 = config.drum_soundfont_path.clone();
+    let player_open = player.clone();
 
     open_btn.connect_clicked(move |_| {
         let dialog = gtk::FileDialog::new();
@@ -1212,6 +1400,9 @@ pub fn build_ui(app: &gtk::Application) {
         let arm_track = arm_track_open.clone();
         let syncing = syncing_tracks_open.clone();
         let bpm_spin_inner = bpm_spin_open.clone();
+        let def_sf2 = def_sf2.clone();
+        let def_drum_sf2 = def_drum_sf2.clone();
+        let p_open = player_open.clone();
 
         dialog.open(Some(&window), None::<&gtk::gio::Cancellable>, move |res| {
             if let Ok(file) = res {
@@ -1219,16 +1410,33 @@ pub fn build_ui(app: &gtk::Application) {
                 let path_str = path.to_string_lossy().to_string();
                 *midi_path.borrow_mut() = Some(path_str.clone());
 
-                let loaded = if path
+                let is_project = path
                     .extension()
-                    .is_some_and(|extension| extension == PROJECT_EXTENSION)
-                {
+                    .is_some_and(|extension| extension == PROJECT_EXTENSION);
+                let loaded = if is_project {
                     ProjectFile::load(&path).map(|project| project.midi)
                 } else {
                     MidiData::load(&path_str)
                 };
                 match loaded {
-                    Ok(data) => {
+                    Ok(mut data) => {
+                        if let Some(p) = &mut *p_open.borrow_mut() {
+                            for track in &mut data.tracks {
+                                let is_drum = matches!(&track.mode, TrackMode::Drum(_));
+                                if !is_project {
+                                    track.synth_source = if is_drum && !def_drum_sf2.is_empty() {
+                                        crate::midi::SynthSource::SoundFont { path: def_drum_sf2.clone() }
+                                    } else {
+                                        crate::midi::SynthSource::SoundFont { path: def_sf2.clone() }
+                                    };
+                                }
+                                
+                                match p.add_or_get_synth(&track.synth_source) {
+                                    Ok(idx) => track.synth_index = idx,
+                                    Err(e) => eprintln!("Failed to load synth for track: {}", e),
+                                }
+                            }
+                        }
                         let bpm = data.get_bpm();
                         let first_track = data.tracks[0].id;
                         bpm_spin_inner.set_value(bpm);
@@ -1532,16 +1740,16 @@ pub fn build_ui(app: &gtk::Application) {
     });
 
     let player_preview_on = player.clone();
-    piano_roll.connect_preview_note_on(move |synth_index, pitch, vel| {
+    piano_roll.connect_preview_note_on(move |synth_index, pitch, vel, channel| {
         if let Some(p) = &*player_preview_on.borrow() {
-            p.preview_note_on(synth_index, pitch, vel);
+            p.preview_note_on(synth_index, channel, pitch, vel);
         }
     });
 
     let player_preview_off = player.clone();
-    piano_roll.connect_preview_note_off(move |synth_index, pitch| {
+    piano_roll.connect_preview_note_off(move |synth_index, pitch, channel| {
         if let Some(p) = &*player_preview_off.borrow() {
-            p.preview_note_off(synth_index, pitch);
+            p.preview_note_off(synth_index, channel, pitch);
         }
     });
 
@@ -1575,6 +1783,7 @@ pub fn build_ui(app: &gtk::Application) {
             }
             p.shutdown();
         }
+        *player_shutdown.borrow_mut() = None;
         glib::Propagation::Proceed
     });
 
@@ -1590,6 +1799,48 @@ pub fn build_ui(app: &gtk::Application) {
     });
 
     window.present();
+
+    if let Some(path_str) = initial_file {
+        let path = std::path::Path::new(&path_str);
+        if !path.extension().is_some_and(|ext| ext == PROJECT_EXTENSION) {
+            eprintln!("Command line loading only supports project files (.midiproj)");
+            return;
+        }
+
+        *current_midi_path.borrow_mut() = Some(path_str.clone());
+        match ProjectFile::load(path) {
+            Ok(project) => {
+                let mut data = project.midi;
+                if let Some(p) = &mut *player.borrow_mut() {
+                    for track in &mut data.tracks {
+                        match p.add_or_get_synth(&track.synth_source) {
+                            Ok(idx) => track.synth_index = idx,
+                            Err(e) => eprintln!("Failed to load synth for track: {}", e),
+                        }
+                    }
+                }
+                let bpm = data.get_bpm();
+                let first_track = data.tracks.first().map(|t| t.id).unwrap_or_else(|| crate::midi::TrackId(1));
+                bpm_spin.set_value(bpm);
+                install_track_data(
+                    &piano_roll,
+                    &track_list,
+                    &track_list_box,
+                    &track_dropdown,
+                    &track_name_entry,
+                    &mute_track_btn,
+                    &solo_track_btn,
+                    &arm_track_btn,
+                    &syncing_tracks,
+                    data,
+                    first_track,
+                    true,
+                );
+                piano_roll.set_playhead(0.0);
+            }
+            Err(e) => eprintln!("Failed to load initial file {}: {}", path_str, e),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -23,6 +23,8 @@ pub enum TrackSynth {
     SoundFont(Synth),
     /// A CLAP plugin instance loaded through [`ClapPluginWrapper`].
     ClapPlugin(ClapPluginWrapper),
+    /// An SFZ synthesizer instance loaded through [`sfizz-rs`].
+    Sfz(sfizz_rs::Sfizz),
 }
 
 impl TrackSynth {
@@ -31,6 +33,7 @@ impl TrackSynth {
         match self {
             TrackSynth::SoundFont(_) => "SoundFont",
             TrackSynth::ClapPlugin(_) => "CLAP",
+            TrackSynth::Sfz(_) => "SFZ",
         }
     }
 
@@ -61,6 +64,15 @@ impl TrackSynth {
                     c.send_note_off(channel, *pitch);
                 }
             },
+            TrackSynth::Sfz(s) => match event {
+                MidiEventType::NoteOn { pitch, velocity } => {
+                    s.send_note_on(0, *pitch, *velocity);
+                }
+                MidiEventType::NoteOff { pitch } => {
+                    // sfizz note off velocity is typically 0
+                    s.send_note_off(0, *pitch, 0);
+                }
+            },
         }
     }
 
@@ -79,6 +91,11 @@ impl TrackSynth {
             TrackSynth::ClapPlugin(c) => {
                 c.send_all_notes_off();
             }
+            TrackSynth::Sfz(s) => {
+                for note in 0..128 {
+                    s.send_note_off(0, note as u8, 0);
+                }
+            }
         }
     }
 
@@ -93,6 +110,10 @@ impl TrackSynth {
             }
             TrackSynth::ClapPlugin(c) => {
                 c.render_block(left, right);
+            }
+            TrackSynth::Sfz(s) => {
+                let num_frames = left.len() as i32;
+                s.render_block(&mut [left, right], num_frames);
             }
         }
     }

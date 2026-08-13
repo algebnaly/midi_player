@@ -1,6 +1,6 @@
 //! Custom GTK4 piano-roll widget.
 //!
-//! [`PianoRollWidget`] is a GObject subclass that renders a grid-based MIDI
+//! [`DrumRollWidget`] is a GObject subclass that renders a grid-based MIDI
 //! piano roll with:
 //!
 //! * A keyboard strip on the left edge.
@@ -19,7 +19,7 @@ mod renderer;
 pub mod types;
 mod viewport;
 
-use crate::midi::{MidiData, Note, TrackId};
+use crate::midi::{MidiData, Note, TrackId, TrackMode};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene};
@@ -50,7 +50,7 @@ mod imp {
     use super::*;
 
     #[derive(Default)]
-    pub struct PianoRollWidget {
+    pub struct DrumRollWidget {
         // ── Data ──────────────────────────────────────────────
         pub data: RefCell<Option<MidiData>>,
         pub active_track: RefCell<usize>,
@@ -100,20 +100,19 @@ mod imp {
         pub data_changed_callback: RefCell<Option<Box<dyn Fn()>>>,
         #[allow(clippy::type_complexity)]
         pub preview_note_on_callback: RefCell<Option<Box<dyn Fn(usize, u8, u8, u8)>>>,
-        #[allow(clippy::type_complexity)]
         pub preview_note_off_callback: RefCell<Option<Box<dyn Fn(usize, u8, u8)>>>,
         #[allow(clippy::type_complexity)]
         pub status_callback: RefCell<Option<Box<dyn Fn(&str)>>>,
     }
 
     #[glib::object_subclass]
-    impl ObjectSubclass for PianoRollWidget {
-        const NAME: &'static str = "PianoRollWidget";
-        type Type = super::PianoRollWidget;
+    impl ObjectSubclass for DrumRollWidget {
+        const NAME: &'static str = "DrumRollWidget";
+        type Type = super::DrumRollWidget;
         type ParentType = gtk::Widget;
     }
 
-    impl ObjectImpl for PianoRollWidget {
+    impl ObjectImpl for DrumRollWidget {
         fn constructed(&self) {
             self.parent_constructed();
             let obj = self.obj();
@@ -126,13 +125,13 @@ mod imp {
             *self.zoom_y.borrow_mut() = 24.0;
             *self.default_note_beats.borrow_mut() = 1.0;
             // Default scroll to middle C area (pitch ~60)
-            *self.scroll_y.borrow_mut() = 60.0 * 32.0 - 300.0;
+            *self.scroll_y.borrow_mut() = 60.0 * 24.0 - 300.0;
 
             input::setup_controllers(&obj);
         }
     }
 
-    impl WidgetImpl for PianoRollWidget {
+    impl WidgetImpl for DrumRollWidget {
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let obj = self.obj();
             let width = obj.width() as f32;
@@ -143,6 +142,14 @@ mod imp {
 
             // Determine if active track is a drum track
             let active_track_idx = *self.active_track.borrow();
+            let drum_map = self.data.borrow().as_ref().and_then(|midi| {
+                midi.tracks.get(active_track_idx).and_then(|track| {
+                    match &track.mode {
+                        TrackMode::Drum(dm) => Some(dm.clone()),
+                        TrackMode::Melodic => None,
+                    }
+                })
+            });
 
             // Background
             snapshot.append_color(
@@ -153,25 +160,28 @@ mod imp {
             // Clip to the grid area (right of keyboard)
             snapshot.push_clip(&graphene::Rect::new(kw, 0.0, width - kw, height));
 
-            // ── Melodic mode rendering (original) ──
-            renderer::render_pitch_lines(snapshot, &vp, &theme);
-            if let Some(midi) = &*self.data.borrow() {
-                renderer::render_beat_grid(snapshot, &vp, midi, &theme);
-                renderer::render_notes(
-                    snapshot,
-                    &vp,
-                    midi,
-                    active_track_idx,
-                    &*self.selected_notes.borrow(),
-                    &theme,
-                );
-            }
+            if let Some(ref dm) = drum_map {
+                // ── Drum mode rendering ──
+                renderer::render_drum_grid(snapshot, &vp, dm, &theme);
+                if let Some(midi) = &*self.data.borrow() {
+                    renderer::render_beat_grid(snapshot, &vp, midi, &theme);
+                    renderer::render_drum_notes(
+                        snapshot,
+                        &vp,
+                        midi,
+                        dm,
+                        active_track_idx,
+                        &*self.selected_notes.borrow(),
+                        &theme,
+                    );
+                }
 
-            renderer::render_playhead(snapshot, &vp, *self.playhead_time.borrow(), &theme);
+                renderer::render_playhead(snapshot, &vp, *self.playhead_time.borrow(), &theme);
 
-            // Render selection rectangle overlay (if active)
-            if let Some(sel) = &*self.selection_rect.borrow() {
-                renderer::render_selection_rect(snapshot, &vp, sel, &theme);
+                // Render selection rectangle overlay (if active)
+                if let Some(sel) = &*self.selection_rect.borrow() {
+                    renderer::render_selection_rect(snapshot, &vp, sel, dm.row_count(), &theme);
+                }
             }
 
             snapshot.pop(); // end clip
@@ -193,7 +203,9 @@ mod imp {
                     .chain(self.playback_active_pitches.borrow().iter().copied()),
             );
 
-            keyboard::render_keyboard(snapshot, &vp, &pango_ctx, &active_pitches, &theme);
+            if let Some(ref dm) = drum_map {
+                keyboard::render_drum_sidebar(snapshot, &vp, &pango_ctx, dm, &active_pitches, &theme);
+            }
         }
     }
 }
@@ -203,7 +215,7 @@ mod imp {
 // ────────────────────────────────────────────────────────────────────────
 
 glib::wrapper! {
-    pub struct PianoRollWidget(ObjectSubclass<imp::PianoRollWidget>)
+    pub struct DrumRollWidget(ObjectSubclass<imp::DrumRollWidget>)
         @extends gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
 }
@@ -212,7 +224,7 @@ glib::wrapper! {
 // Public API
 // ────────────────────────────────────────────────────────────────────────
 
-impl PianoRollWidget {
+impl DrumRollWidget {
     pub fn new() -> Self {
         glib::Object::builder().build()
     }
@@ -336,7 +348,15 @@ impl PianoRollWidget {
         self.imp().selected_notes.borrow_mut().clear();
         self.imp().playback_active_pitches.borrow_mut().clear();
 
-
+        // Auto-scroll to drum range when switching to a drum track
+        if let Some(midi) = &*self.imp().data.borrow() {
+            if let Some(track) = midi.tracks.get(track_idx) {
+                if matches!(&track.mode, TrackMode::Drum(_)) {
+                    // Scroll to top of drum grid
+                    *self.imp().scroll_y.borrow_mut() = 0.0;
+                }
+            }
+        }
 
         self.queue_draw();
     }
@@ -679,7 +699,7 @@ impl PianoRollWidget {
         let synth_index = self.active_synth_index();
         for pitch in pitches {
             if let Some(cb) = &*imp.preview_note_off_callback.borrow() {
-                cb(synth_index, pitch, 0);
+                cb(synth_index, pitch, 9);
             }
         }
         imp.typing_pressed_keys.borrow_mut().clear();

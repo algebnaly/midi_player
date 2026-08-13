@@ -20,6 +20,8 @@ use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, T
 use serde::{Deserialize, Serialize};
 use std::fs;
 
+use crate::drum_map::DrumMap;
+
 /// Stable identity of a MIDI track. Unlike its vector index, this value does
 /// not change when tracks are reordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -60,14 +62,46 @@ pub struct TrackInputSettings {
     pub transpose: i8,
 }
 
+/// Describes which synthesizer backend a track should use.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SynthSource {
+    SoundFont { path: String },
+    ClapPlugin { path: String },
+    Sfz { path: String },
+}
+
+impl Default for SynthSource {
+    fn default() -> Self {
+        SynthSource::SoundFont { path: String::new() }
+    }
+}
+
+/// Distinguishes melodic tracks from drum/percussion tracks.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TrackMode {
+    /// Standard melodic instrument (piano, guitar, bass, etc.).
+    Melodic,
+    /// Percussion/drum track with a custom drum map.
+    Drum(DrumMap),
+}
+
+impl Default for TrackMode {
+    fn default() -> Self {
+        TrackMode::Melodic
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackData {
     pub id: TrackId,
     pub name: String,
     pub notes: Vec<Note>,
+    #[serde(skip, default)]
     pub synth_index: usize,
+    pub synth_source: SynthSource,
     pub mixer: TrackMixerSettings,
     pub input: TrackInputSettings,
+    pub mode: TrackMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,8 +136,10 @@ impl MidiData {
                 name: "Track 0".to_string(),
                 notes: Vec::new(),
                 synth_index: 0,
+                synth_source: SynthSource::default(),
                 mixer: TrackMixerSettings::default(),
                 input: TrackInputSettings::default(),
+                mode: TrackMode::default(),
             });
         } else {
             for (synth_index, name) in track_names.iter().enumerate() {
@@ -112,8 +148,10 @@ impl MidiData {
                     name: name.clone(),
                     notes: Vec::new(),
                     synth_index,
+                    synth_source: SynthSource::default(),
                     mixer: TrackMixerSettings::default(),
                     input: TrackInputSettings::default(),
+                    mode: TrackMode::default(),
                 });
             }
         }
@@ -139,8 +177,10 @@ impl MidiData {
             name,
             notes: Vec::new(),
             synth_index,
+            synth_source: SynthSource::default(),
             mixer: TrackMixerSettings::default(),
             input: TrackInputSettings::default(),
+            mode: TrackMode::default(),
         });
         id
     }
@@ -159,13 +199,15 @@ impl MidiData {
             TrackData {
                 id,
                 name: format!("{} Copy", source.name),
-                notes: source.notes,
+                notes: source.notes.clone(),
                 synth_index: source.synth_index,
+                synth_source: source.synth_source.clone(),
                 mixer: source.mixer,
                 input: TrackInputSettings {
                     armed: false,
                     ..source.input
                 },
+                mode: source.mode.clone(),
             },
         );
         Some(id)
@@ -349,13 +391,20 @@ impl MidiData {
 
             notes.sort_by_key(|n| n.start_tick);
             if !notes.is_empty() {
+                let mode = if notes.iter().any(|n| n.channel == 9) {
+                    TrackMode::Drum(DrumMap::gm_default())
+                } else {
+                    TrackMode::default()
+                };
                 tracks.push(TrackData {
                     id: TrackId(tracks.len() as u64 + 1),
                     name: name.unwrap_or_else(|| format!("Track {}", tracks.len())),
                     notes,
                     synth_index: 0,
+                    synth_source: SynthSource::default(),
                     mixer: TrackMixerSettings::default(),
                     input: TrackInputSettings::default(),
+                    mode,
                 });
             }
         }
@@ -364,10 +413,12 @@ impl MidiData {
             tracks.push(TrackData {
                 id: TrackId(1),
                 name: "Track 0".to_string(),
-                notes: Vec::new(),
+                notes: vec![],
                 synth_index: 0,
+                synth_source: SynthSource::default(),
                 mixer: TrackMixerSettings::default(),
                 input: TrackInputSettings::default(),
+                mode: TrackMode::default(),
             });
         }
 
@@ -559,8 +610,10 @@ mod tests {
                 name: "t0".into(),
                 notes,
                 synth_index: 0,
+                synth_source: SynthSource::default(),
                 mixer: TrackMixerSettings::default(),
                 input: TrackInputSettings::default(),
+                mode: TrackMode::default(),
             }],
             ticks_per_beat: 480,
             tempo_map: vec![(0, 500_000)],

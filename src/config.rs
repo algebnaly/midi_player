@@ -18,8 +18,15 @@ pub struct AppConfig {
     pub global_gain: f64,
     /// Path to the default SoundFont file.
     pub soundfont_path: String,
+    /// Path to a SoundFont used for drum/percussion tracks (channel 9).
+    /// Falls back to `soundfont_path` if empty or missing.
+    pub drum_soundfont_path: String,
     /// Path to the default CLAP plugin file.
     pub clap_plugin_path: String,
+    /// Path to an SFZ file to test sfizz-rs.
+    pub sfz_path: String,
+    /// Directories to scan for soundbanks (*.sf2, *.sfz, *.clap)
+    pub soundbank_dirs: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -29,7 +36,14 @@ impl Default for AppConfig {
             default_note_beats: 1.0,
             global_gain: 0.5,
             soundfont_path: "default.sf2".to_string(),
+            drum_soundfont_path: String::new(),
             clap_plugin_path: "./plugin.clap".to_string(),
+            sfz_path: String::new(),
+            soundbank_dirs: vec![
+                "~/.local/share/midi_player/soundbanks".to_string(),
+                "~/.soundfonts".to_string(),
+                "/usr/share/soundfonts".to_string(),
+            ],
         }
     }
 }
