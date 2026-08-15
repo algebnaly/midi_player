@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --example generate_demo_midi
 
-use midly::num::{u15, u24, u28, u4, u7};
+use midly::num::{u4, u7, u15, u24, u28};
 use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind};
 use std::fs;
 
@@ -204,12 +204,12 @@ fn build_drum_track(tpb: u16) -> Vec<TrackEvent<'static>> {
     let eighth = quarter / 2;
 
     // GM drum pitches
-    let kick: u8 = 36;    // Bass Drum 1
-    let snare: u8 = 38;   // Acoustic Snare
-    let hh_cl: u8 = 42;   // Closed Hi-Hat
-    let hh_op: u8 = 46;   // Open Hi-Hat
-    let crash: u8 = 49;   // Crash Cymbal 1
-    let ride: u8 = 51;    // Ride Cymbal 1
+    let kick: u8 = 36; // Bass Drum 1
+    let snare: u8 = 38; // Acoustic Snare
+    let hh_cl: u8 = 42; // Closed Hi-Hat
+    let hh_op: u8 = 46; // Open Hi-Hat
+    let crash: u8 = 49; // Crash Cymbal 1
+    let ride: u8 = 51; // Ride Cymbal 1
 
     // Drum hit: very short note (1/32 beat)
     let hit_dur = tpb as u32 / 8;

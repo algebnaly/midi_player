@@ -1,7 +1,7 @@
 use crate::drum_roll::DrumRollWidget;
 use crate::midi::{MidiData, TrackId};
-use crate::piano_roll::types::EditMode;
 use crate::piano_roll::PianoRollWidget;
+use crate::piano_roll::types::EditMode;
 use crate::roll::RollView;
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -154,7 +154,10 @@ impl RollStack {
 
         while widgets.len() < midi.tracks.len() {
             let track_idx = widgets.len();
-            let is_drum = matches!(&midi.tracks[track_idx].mode, crate::midi::TrackMode::Drum(_));
+            let is_drum = matches!(
+                &midi.tracks[track_idx].mode,
+                crate::midi::TrackMode::Drum(_)
+            );
             let new_widget = self.create_widget(track_idx, is_drum);
             let name = format!("track_{}", track_idx);
             self.stack.add_named(new_widget.widget(), Some(&name));
@@ -234,16 +237,6 @@ impl RollStack {
             match w {
                 RollWidget::Melodic(mw) => mw.set_playhead(ticks),
                 RollWidget::Drum(dw) => dw.set_playhead(ticks),
-            }
-        }
-    }
-
-    pub fn handle_note_deleted(&self, track: usize, note_idx: usize) {
-        let widgets = self.widgets.borrow();
-        if let Some(w) = widgets.get(track) {
-            match w {
-                RollWidget::Melodic(mw) => mw.handle_note_deleted(track, note_idx),
-                RollWidget::Drum(dw) => dw.handle_note_deleted(track, note_idx),
             }
         }
     }
@@ -386,7 +379,9 @@ impl RollStack {
         let widgets = self.widgets.borrow();
         if let Some(w) = widgets.get(self.active_idx.get()) {
             match w {
-                RollWidget::Melodic(mw) => mw.put_midi_note_on(channel, pitch, velocity, occurred_at),
+                RollWidget::Melodic(mw) => {
+                    mw.put_midi_note_on(channel, pitch, velocity, occurred_at)
+                }
                 RollWidget::Drum(dw) => dw.put_midi_note_on(channel, pitch, velocity, occurred_at),
             }
         } else {
@@ -394,7 +389,12 @@ impl RollStack {
         }
     }
 
-    pub fn put_midi_note_off(&self, channel: u8, pitch: u8, occurred_at: std::time::Instant) -> bool {
+    pub fn put_midi_note_off(
+        &self,
+        channel: u8,
+        pitch: u8,
+        occurred_at: std::time::Instant,
+    ) -> bool {
         let widgets = self.widgets.borrow();
         if let Some(w) = widgets.get(self.active_idx.get()) {
             match w {

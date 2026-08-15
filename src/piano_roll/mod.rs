@@ -70,7 +70,12 @@ mod imp {
                     &theme,
                 );
             }
-            shared_renderer::render_playhead(snapshot, &vp, *self.inner.playhead_time.borrow(), &theme);
+            shared_renderer::render_playhead(
+                snapshot,
+                &vp,
+                *self.inner.playhead_time.borrow(),
+                &theme,
+            );
             if let Some(sel) = &*self.inner.selection_rect.borrow() {
                 shared_renderer::render_selection_rect::<MelodicLayout>(
                     snapshot,

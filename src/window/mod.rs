@@ -16,8 +16,8 @@ mod track_panel;
 mod tracks;
 mod velocity_panel;
 
-use gtk::prelude::*;
 use gtk::ApplicationWindow;
+use gtk::prelude::*;
 use gtk4 as gtk;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -31,7 +31,7 @@ use crate::velocity_curve::VelocityCurve;
 
 use files::{load_initial_project, wire_file_actions};
 use header::build_header;
-use helpers::{midi_input_target, TrackUi};
+use helpers::{TrackUi, midi_input_target};
 use midi_devices::wire_midi_input;
 use modes::wire_edit_mode_buttons;
 use playback::wire_playback;
@@ -41,7 +41,9 @@ use velocity_panel::attach_velocity_panel;
 
 pub fn build_ui(app: &gtk::Application, initial_file: Option<String>) {
     let config = AppConfig::load();
-    let soundbank_manager = Rc::new(crate::soundbank::SoundbankManager::scan(&config.soundbank_dirs));
+    let soundbank_manager = Rc::new(crate::soundbank::SoundbankManager::scan(
+        &config.soundbank_dirs,
+    ));
     let velocity_curve = VelocityCurve::default();
 
     let window = ApplicationWindow::builder()

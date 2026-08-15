@@ -187,6 +187,8 @@ pub struct HitTestResult {
 pub struct Theme {
     pub background: gdk::RGBA,
     pub grid_line: gdk::RGBA,
+    pub octave_line: gdk::RGBA,
+    pub octave_line_width: f32,
     pub bar_line: gdk::RGBA,
     pub bar_line_width: f32,
     pub beat_line: gdk::RGBA,
@@ -214,6 +216,8 @@ pub fn default_theme() -> Theme {
     Theme {
         background: gdk::RGBA::new(0.1, 0.1, 0.1, 1.0),
         grid_line: gdk::RGBA::new(0.2, 0.2, 0.2, 1.0),
+        octave_line: gdk::RGBA::new(0.38, 0.38, 0.38, 1.0),
+        octave_line_width: 2.0,
         bar_line: gdk::RGBA::new(0.5, 0.5, 0.5, 0.8),
         bar_line_width: 2.0,
         beat_line: gdk::RGBA::new(0.35, 0.35, 0.35, 0.6),

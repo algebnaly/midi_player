@@ -22,14 +22,14 @@ mod audio_engine;
 mod clap_audio;
 mod clap_host;
 mod config;
+mod drum_roll;
 mod midi;
 mod midi_input;
 mod piano_roll;
-mod drum_roll;
-mod roll;
-mod roll_stack;
 mod player;
 mod project;
+mod roll;
+mod roll_stack;
 mod sequencer;
 mod soundbank;
 mod synth;
@@ -47,7 +47,7 @@ fn main() {
     let app = Application::builder()
         .application_id("com.github.midiplayer")
         // prevent GTK from trying to parse the file argument
-        .flags(gtk::gio::ApplicationFlags::NON_UNIQUE) 
+        .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
     app.connect_activate(move |app| {

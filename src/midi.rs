@@ -72,7 +72,9 @@ pub enum SynthSource {
 
 impl Default for SynthSource {
     fn default() -> Self {
-        SynthSource::SoundFont { path: String::new() }
+        SynthSource::SoundFont {
+            path: String::new(),
+        }
     }
 }
 

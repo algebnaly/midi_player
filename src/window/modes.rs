@@ -1,7 +1,7 @@
 //! Select-mode and typing-keyboard header toggles.
 
-use gtk::prelude::*;
 use gtk::ToggleButton;
+use gtk::prelude::*;
 use gtk4 as gtk;
 use std::cell::Cell;
 use std::rc::Rc;

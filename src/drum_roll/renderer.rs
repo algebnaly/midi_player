@@ -99,10 +99,7 @@ pub fn render_drum_notes(
                 &bc,
                 &graphene::Rect::new(x, center_y + half_y - 1.0, final_w, 1.0),
             );
-            snapshot.append_color(
-                &bc,
-                &graphene::Rect::new(x, center_y - half_y, 1.0, size_y),
-            );
+            snapshot.append_color(&bc, &graphene::Rect::new(x, center_y - half_y, 1.0, size_y));
             snapshot.append_color(
                 &bc,
                 &graphene::Rect::new(x + final_w - 1.0, center_y - half_y, 1.0, size_y),

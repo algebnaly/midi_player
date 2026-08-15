@@ -77,11 +77,6 @@ pub trait RollView: Clone + 'static {
         self.redraw();
     }
 
-    fn update_data_and_notify(&self, midi: MidiData) {
-        self.update_data(midi);
-        self.notify_data_changed();
-    }
-
     fn notify_data_changed(&self) {
         self.state().notify_data_changed();
     }
@@ -133,10 +128,6 @@ pub trait RollView: Clone + 'static {
         self.redraw();
     }
 
-    fn active_track_index(&self) -> usize {
-        self.state().active_track_index()
-    }
-
     fn active_track_id(&self) -> Option<TrackId> {
         self.state().active_track_id()
     }
@@ -167,13 +158,7 @@ pub trait RollView: Clone + 'static {
         }
     }
 
-    fn put_midi_note_on(
-        &self,
-        channel: u8,
-        pitch: u8,
-        velocity: u8,
-        occurred_at: Instant,
-    ) -> bool {
+    fn put_midi_note_on(&self, channel: u8, pitch: u8, velocity: u8, occurred_at: Instant) -> bool {
         if self
             .state()
             .put_midi_note_on(channel, pitch, velocity, occurred_at)

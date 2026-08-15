@@ -53,10 +53,12 @@ mod imp {
             let theme = default_theme();
             let active_track_idx = *self.inner.active_track.borrow();
             let drum_map = self.inner.data.borrow().as_ref().and_then(|midi| {
-                midi.tracks.get(active_track_idx).and_then(|track| match &track.mode {
-                    TrackMode::Drum(dm) => Some(dm.clone()),
-                    TrackMode::Melodic => None,
-                })
+                midi.tracks
+                    .get(active_track_idx)
+                    .and_then(|track| match &track.mode {
+                        TrackMode::Drum(dm) => Some(dm.clone()),
+                        TrackMode::Melodic => None,
+                    })
             });
 
             snapshot.append_color(

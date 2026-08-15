@@ -12,7 +12,10 @@ use crate::midi::{MidiData, TrackId, TrackMode};
 use crate::midi_input::MidiInputPortInfo;
 use crate::roll_stack::RollStack;
 
-pub fn cached_midi_port_position(ports: &[MidiInputPortInfo], cached: &CachedMidiInput) -> Option<u32> {
+pub fn cached_midi_port_position(
+    ports: &[MidiInputPortInfo],
+    cached: &CachedMidiInput,
+) -> Option<u32> {
     ports
         .iter()
         .position(|port| port.id == cached.port_id)

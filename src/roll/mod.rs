@@ -9,8 +9,8 @@ pub mod layout;
 pub mod renderer;
 pub mod state;
 pub mod types;
-pub mod viewport;
 pub mod view;
+pub mod viewport;
 
 #[allow(unused_imports)]
 pub use layout::{DrumLayout, MelodicLayout, RollLayout};
@@ -18,6 +18,6 @@ pub use layout::{DrumLayout, MelodicLayout, RollLayout};
 pub use state::RollState;
 #[allow(unused_imports)]
 pub use types::*;
+pub use view::RollView;
 #[allow(unused_imports)]
 pub use viewport::Viewport;
-pub use view::RollView;

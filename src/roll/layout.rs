@@ -160,7 +160,8 @@ impl RollLayout for DrumLayout {
             return orig_pitch;
         };
         let last = dm.row_count().saturating_sub(1) as i32;
-        let new_row = (row as i32 + current_lane as i32 - start_lane as i32).clamp(0, last) as usize;
+        let new_row =
+            (row as i32 + current_lane as i32 - start_lane as i32).clamp(0, last) as usize;
         dm.row_to_pitch(new_row).unwrap_or(orig_pitch)
     }
 

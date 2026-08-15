@@ -51,12 +51,7 @@ pub struct Player {
     /// `None` for SoundFont tracks.
     clap_gui_handles: Vec<Option<ClapPluginGuiHandle>>,
     /// The sample rate negotiated with the audio device (Hz).
-    #[allow(dead_code)]
     sample_rate: f64,
-    /// Synth index for drum tracks (1 if a dedicated drum SF2 was loaded, else 0).
-    drum_synth_index: usize,
-    /// Synth index for the loaded SFZ file (if any, else 0).
-    pub sfz_synth_index: usize,
     /// Mapping of synth sources to their indices in the `synths` vector.
     pub loaded_synths: std::collections::HashMap<crate::midi::SynthSource, usize>,
 }
@@ -71,7 +66,13 @@ impl Player {
     /// A CLAP plugin is optionally loaded from `clap_path` if the file
     /// exists.  If neither a SoundFont nor a CLAP plugin can be loaded the
     /// player will still start, but no audio will be produced.
-    pub fn new(sf2_path: &str, drum_sf2_path: &str, clap_path: &str, sfz_path: &str, global_gain: f32) -> anyhow::Result<Self> {
+    pub fn new(
+        sf2_path: &str,
+        drum_sf2_path: &str,
+        clap_path: &str,
+        sfz_path: &str,
+        global_gain: f32,
+    ) -> anyhow::Result<Self> {
         let font = Self::load_soundfont(sf2_path)?;
 
         let mut main_synth = Synth::default();
@@ -101,7 +102,10 @@ impl Player {
                     synths_vec.len() - 1
                 }
                 Err(e) => {
-                    eprintln!("Failed to load drum SoundFont {}: {}. Drums will use main SF.", drum_sf2_path, e);
+                    eprintln!(
+                        "Failed to load drum SoundFont {}: {}. Drums will use main SF.",
+                        drum_sf2_path, e
+                    );
                     0
                 }
             }
@@ -184,12 +188,27 @@ impl Player {
 
         let mut loaded_synths = std::collections::HashMap::new();
         // Assume default SoundFont is at index 0.
-        loaded_synths.insert(crate::midi::SynthSource::SoundFont { path: sf2_path.to_string() }, 0);
+        loaded_synths.insert(
+            crate::midi::SynthSource::SoundFont {
+                path: sf2_path.to_string(),
+            },
+            0,
+        );
         if drum_synth_index != 0 {
-            loaded_synths.insert(crate::midi::SynthSource::SoundFont { path: drum_sf2_path.to_string() }, drum_synth_index);
+            loaded_synths.insert(
+                crate::midi::SynthSource::SoundFont {
+                    path: drum_sf2_path.to_string(),
+                },
+                drum_synth_index,
+            );
         }
         if sfz_synth_index != 0 {
-            loaded_synths.insert(crate::midi::SynthSource::Sfz { path: sfz_path.to_string() }, sfz_synth_index);
+            loaded_synths.insert(
+                crate::midi::SynthSource::Sfz {
+                    path: sfz_path.to_string(),
+                },
+                sfz_synth_index,
+            );
         }
         // Assuming clap plugin is at index 2 if loaded, but we can't easily know its index without checking gui_handles. We can add it dynamically later.
 
@@ -205,13 +224,10 @@ impl Player {
             live_notes,
             clap_gui_handles: gui_handles,
             sample_rate: 44100.0,
-            drum_synth_index,
-            sfz_synth_index,
             loaded_synths,
         })
     }
 
-    /// Returns the synth index that drum tracks should use.
     pub fn add_or_get_synth(&mut self, source: &crate::midi::SynthSource) -> anyhow::Result<usize> {
         if let Some(&index) = self.loaded_synths.get(source) {
             return Ok(index);
@@ -237,8 +253,9 @@ impl Player {
                 }
             }
             crate::midi::SynthSource::ClapPlugin { path } => {
-                let (wrapper, handle) = crate::clap_host::ClapPluginWrapper::new(path, self.sample_rate as u32)
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                let (wrapper, handle) =
+                    crate::clap_host::ClapPluginWrapper::new(path, self.sample_rate as u32)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
                 (crate::synth::TrackSynth::ClapPlugin(wrapper), Some(handle))
             }
         };
@@ -250,14 +267,6 @@ impl Player {
         self.loaded_synths.insert(source.clone(), index);
 
         Ok(index)
-    }
-
-    pub fn drum_synth_index(&self) -> usize {
-        self.drum_synth_index
-    }
-
-    pub fn sfz_synth_index(&self) -> usize {
-        self.sfz_synth_index
     }
 
     // ------------------------------------------------------------------
@@ -427,7 +436,10 @@ impl Player {
         if let Ok(mut synths) = self.synths.lock() {
             let idx = synth_index % synths.len();
             if let Some(synth) = synths.get_mut(idx) {
-                synth.send_midi_event(channel, &crate::midi::MidiEventType::NoteOn { pitch, velocity });
+                synth.send_midi_event(
+                    channel,
+                    &crate::midi::MidiEventType::NoteOn { pitch, velocity },
+                );
             }
         }
     }

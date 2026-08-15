@@ -1,6 +1,9 @@
 //! Mutable roll state shared by piano and drum GObject widgets.
 
-use super::types::{DragState, EditMode, SelectionRect, has_exact_note, note_name, put_note_length, snap_tick_to_beat};
+use super::types::{
+    DragState, EditMode, SelectionRect, has_exact_note, note_name, put_note_length,
+    snap_tick_to_beat,
+};
 use crate::midi::{MidiData, Note, TrackId};
 use gtk::gdk;
 use gtk4 as gtk;
@@ -331,7 +334,11 @@ impl RollState {
     }
 
     pub fn put_midi_note_off(&self, channel: u8, pitch: u8, occurred_at: Instant) -> bool {
-        let Some(pending) = self.pending_put_notes.borrow_mut().remove(&(channel, pitch)) else {
+        let Some(pending) = self
+            .pending_put_notes
+            .borrow_mut()
+            .remove(&(channel, pitch))
+        else {
             return false;
         };
         let elapsed_seconds = occurred_at

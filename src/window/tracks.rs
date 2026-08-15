@@ -9,7 +9,7 @@ use crate::midi_input::MidiInputManager;
 use crate::player::Player;
 use crate::soundbank::SoundbankManager;
 
-use super::helpers::{midi_input_target, TrackUi};
+use super::helpers::{TrackUi, midi_input_target};
 use super::track_panel::TrackPanel;
 
 pub fn wire_track_controls(
@@ -115,32 +115,40 @@ pub fn wire_track_controls(
     let tracks_instrument = tracks.clone();
     let instrument_manager = soundbank;
     let player_instrument = player;
-    panel.instrument_btn.connect_clicked(move |_| {
+    panel.instrument_btn.connect_clicked(move |btn| {
         let Some(active_track) = tracks_instrument.roll.active_track_id() else {
             return;
         };
 
-        let dialog = gtk::Dialog::builder()
+        let mut dialog_builder = gtk::Window::builder()
             .title("Select Instrument")
             .modal(true)
             .default_width(400)
-            .default_height(500)
-            .build();
+            .default_height(500);
+        if let Some(parent) = btn
+            .root()
+            .and_then(|root| root.downcast::<gtk::Window>().ok())
+        {
+            dialog_builder = dialog_builder.transient_for(&parent);
+        }
+        let dialog = dialog_builder.build();
 
-        let content_area = dialog.content_area();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        dialog.set_child(Some(&content));
+
         let search_entry = gtk::SearchEntry::new();
         search_entry.set_margin_top(8);
         search_entry.set_margin_bottom(8);
         search_entry.set_margin_start(8);
         search_entry.set_margin_end(8);
-        content_area.append(&search_entry);
+        content.append(&search_entry);
 
         let scrolled = gtk::ScrolledWindow::new();
         scrolled.set_vexpand(true);
         let listbox = gtk::ListBox::new();
         listbox.set_selection_mode(gtk::SelectionMode::Single);
         scrolled.set_child(Some(&listbox));
-        content_area.append(&scrolled);
+        content.append(&scrolled);
 
         for bank in &instrument_manager.banks {
             let row = gtk::ListBoxRow::new();

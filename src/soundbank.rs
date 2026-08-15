@@ -42,7 +42,11 @@ impl SoundbankManager {
                     Self::scan_dir_recursive(&path, banks);
                 } else if path.is_file() {
                     if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                        let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                        let name = path
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
                         let path_str = path.to_string_lossy().to_string();
                         match ext.to_lowercase().as_str() {
                             "sf2" => {

@@ -134,7 +134,8 @@ fn handle_right_click<W: RollView>(widget: &W, x: f64, y: f64) {
     if let Some(target_pitch) = target_pitch {
         let zy = *s.zoom_y.borrow();
         if let Some(midi) = &mut *s.data.borrow_mut() {
-            if let Some(hit) = hit_test_note::<W::Layout>(midi, act_track, zx, zy, abs_x, target_pitch)
+            if let Some(hit) =
+                hit_test_note::<W::Layout>(midi, act_track, zx, zy, abs_x, target_pitch)
             {
                 midi.tracks[act_track].notes.remove(hit.note_index);
                 deleted_note_index = Some(hit.note_index);
@@ -255,7 +256,8 @@ fn handle_drag_begin_select<W: RollView>(
 
     if let Some(midi) = &*s.data.borrow() {
         let zy = *s.zoom_y.borrow();
-        if let Some(hit) = hit_test_note::<W::Layout>(midi, act_track, zx, zy, abs_x, target_pitch) {
+        if let Some(hit) = hit_test_note::<W::Layout>(midi, act_track, zx, zy, abs_x, target_pitch)
+        {
             if s.selected_notes.borrow().contains(&hit.note_index) {
                 let mut orig_notes = HashMap::new();
                 for &idx in s.selected_notes.borrow().iter() {
@@ -302,7 +304,8 @@ fn handle_drag_begin_draw<W: RollView>(widget: &W, abs_x: f64, target_pitch: u8,
     let mut tps = 1.0;
     if let Some(midi) = &*s.data.borrow() {
         tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
-        if let Some(hit) = hit_test_note::<W::Layout>(midi, act_track, zx, zy, abs_x, target_pitch) {
+        if let Some(hit) = hit_test_note::<W::Layout>(midi, act_track, zx, zy, abs_x, target_pitch)
+        {
             let note = midi.tracks[act_track].notes[hit.note_index].clone();
             found = Some((hit, note));
         }
@@ -436,13 +439,7 @@ pub fn update_drag_position<W: RollView>(widget: &W, dx: f64, _dy: f64) {
                     );
                     if nx + nw >= x_lo
                         && nx <= x_hi
-                        && W::Layout::note_in_lanes(
-                            note.pitch,
-                            lane_lo,
-                            lane_hi,
-                            Some(midi),
-                            act,
-                        )
+                        && W::Layout::note_in_lanes(note.pitch, lane_lo, lane_hi, Some(midi), act)
                     {
                         new_sel.insert(i);
                     }
@@ -465,14 +462,11 @@ pub fn update_drag_position<W: RollView>(widget: &W, dx: f64, _dy: f64) {
             if act >= midi.tracks.len() {
                 return;
             }
-            let zx = *s.zoom_x.borrow();
-            let ox = *s.scroll_x.borrow();
             let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
             let cursor_x = *s.cursor_x.borrow();
             let cursor_y = *s.cursor_y.borrow();
-            let current_abs_x = cursor_x - KEY_WIDTH + ox;
-            let cursor_tick = (current_abs_x / zx) * tps;
             let vp = widget.build_viewport();
+            let cursor_tick = vp.x_to_tick(cursor_x, tps);
             let start_lane = s.drag_state.borrow().start_lane;
             let current_lane = W::Layout::y_to_lane(&vp, cursor_y, Some(midi), act);
             let start_cursor_tick = s.drag_state.borrow().start_cursor_tick;
@@ -483,8 +477,13 @@ pub fn update_drag_position<W: RollView>(widget: &W, dx: f64, _dy: f64) {
                 if idx >= midi.tracks[act].notes.len() {
                     continue;
                 }
-                let np =
-                    W::Layout::pitch_after_lane_delta(orig.pitch, start_lane, current_lane, midi, act);
+                let np = W::Layout::pitch_after_lane_delta(
+                    orig.pitch,
+                    start_lane,
+                    current_lane,
+                    midi,
+                    act,
+                );
                 let n = &mut midi.tracks[act].notes[idx];
                 let dur = orig.end_tick as i64 - orig.start_tick as i64;
                 let ns = (orig.start_tick as f64 + delta_ticks).max(0.0) as u64;
@@ -513,13 +512,11 @@ pub fn update_drag_position<W: RollView>(widget: &W, dx: f64, _dy: f64) {
         if act >= midi.tracks.len() || idx >= midi.tracks[act].notes.len() {
             return;
         }
-        let zx = *s.zoom_x.borrow();
-        let ox = *s.scroll_x.borrow();
         let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
         let cursor_x = *s.cursor_x.borrow();
         let cursor_y = *s.cursor_y.borrow();
-        let current_abs_x = cursor_x - KEY_WIDTH + ox;
-        let cursor_tick = (current_abs_x / zx) * tps;
+        let vp = widget.build_viewport();
+        let cursor_tick = vp.x_to_tick(cursor_x, tps);
         let synth_index = midi.tracks[act].synth_index;
         let channel = W::Layout::note_channel();
 
@@ -541,7 +538,6 @@ pub fn update_drag_position<W: RollView>(widget: &W, dx: f64, _dy: f64) {
             };
             let ns_snapped = snap_tick(ns, midi.ticks_per_beat);
             let ne = ns_snapped as i64 + dur;
-            let vp = widget.build_viewport();
             let start_lane = s.drag_state.borrow().start_lane;
             let current_lane = W::Layout::y_to_lane(&vp, cursor_y, Some(midi), act);
             let np =

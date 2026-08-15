@@ -37,7 +37,8 @@ pub fn make_floating_panel_draggable(
         let Some((origin_x, origin_y, pointer_origin_x, pointer_origin_y)) = origin.get() else {
             return;
         };
-        let Some((pointer_x, pointer_y)) = gesture.current_event().and_then(|event| event.position())
+        let Some((pointer_x, pointer_y)) =
+            gesture.current_event().and_then(|event| event.position())
         else {
             return;
         };
