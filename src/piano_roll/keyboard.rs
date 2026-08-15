@@ -7,21 +7,16 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use std::collections::HashSet;
 
-/// Relative Y offsets for each white key within an octave (bottom, top)
-/// expressed as multiples of `zoom_y`.  The 12 semitones span 12 × zoom_y
-/// pixels, and the 7 white keys are distributed unevenly to leave room
-/// for black keys.
 const WHITE_KEY_OFFSETS: [(f32, f32); 7] = [
-    (0.0, 5.0 / 3.0),        // C
-    (5.0 / 3.0, 10.0 / 3.0), // D
-    (10.0 / 3.0, 5.0),       // E
-    (5.0, 5.0 + 1.75),       // F
-    (5.0 + 1.75, 5.0 + 3.5), // G
-    (5.0 + 3.5, 5.0 + 5.25), // A
-    (5.0 + 5.25, 12.0),      // B
+    (0.0, 5.0 / 3.0),
+    (5.0 / 3.0, 10.0 / 3.0),
+    (10.0 / 3.0, 5.0),
+    (5.0, 5.0 + 1.75),
+    (5.0 + 1.75, 5.0 + 3.5),
+    (5.0 + 3.5, 5.0 + 5.25),
+    (5.0 + 5.25, 12.0),
 ];
 
-/// Render the piano keyboard strip on the left side of the widget.
 pub fn render_keyboard(
     snapshot: &gtk::Snapshot,
     vp: &Viewport,
@@ -32,10 +27,7 @@ pub fn render_keyboard(
     let kw = KEY_WIDTH as f32;
     let height = vp.height as f32;
     let zy = vp.zoom_y as f32;
-
     let font_desc = gtk::pango::FontDescription::from_string("Sans 11");
-
-    // ── First pass: white keys ─────────────────────────────────────
 
     for pitch in 0u8..128 {
         if is_black_key(pitch) {
@@ -67,7 +59,6 @@ pub fn render_keyboard(
             &graphene::Rect::new(0.0, bottom_y, kw, 1.0),
         );
 
-        // Octave label on C keys
         if pitch % 12 == 0 {
             let layout = gtk::pango::Layout::new(pango_ctx);
             layout.set_font_description(Some(&font_desc));
@@ -79,8 +70,6 @@ pub fn render_keyboard(
             snapshot.restore();
         }
     }
-
-    // ── Second pass: black keys (drawn on top) ─────────────────────
 
     for pitch in 0u8..128 {
         if !is_black_key(pitch) {
@@ -116,52 +105,21 @@ pub fn render_keyboard(
     }
 }
 
-
-
-// ── Helpers ────────────────────────────────────────────────────────────
-
-pub fn keyboard_active_pitches(
-    preview_active_pitch: Option<u8>,
-    typing_pressed_pitches: impl IntoIterator<Item = u8>,
-) -> HashSet<u8> {
-    let mut active_pitches: HashSet<u8> = typing_pressed_pitches.into_iter().collect();
-    if let Some(pitch) = preview_active_pitch {
-        active_pitches.insert(pitch);
-    }
-    active_pitches
-}
-
 #[inline]
 fn is_black_key(pitch: u8) -> bool {
     matches!(pitch % 12, 1 | 3 | 6 | 8 | 10)
 }
 
-/// Map a white-key pitch class to its index in [`WHITE_KEY_OFFSETS`].
 #[inline]
 fn white_key_index(pitch: u8) -> usize {
     match pitch % 12 {
-        0 => 0,  // C
-        2 => 1,  // D
-        4 => 2,  // E
-        5 => 3,  // F
-        7 => 4,  // G
-        9 => 5,  // A
-        11 => 6, // B
+        0 => 0,
+        2 => 1,
+        4 => 2,
+        5 => 3,
+        7 => 4,
+        9 => 5,
+        11 => 6,
         _ => unreachable!(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn active_pitch_set_supports_multiple_highlights() {
-        let active_pitches = keyboard_active_pitches(Some(64), [60, 67]);
-
-        assert!(active_pitches.contains(&60));
-        assert!(active_pitches.contains(&64));
-        assert!(active_pitches.contains(&67));
-        assert_eq!(active_pitches.len(), 3);
     }
 }

@@ -2,6 +2,7 @@ use crate::drum_roll::DrumRollWidget;
 use crate::midi::{MidiData, TrackId};
 use crate::piano_roll::types::EditMode;
 use crate::piano_roll::PianoRollWidget;
+use crate::roll::RollView;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use std::cell::{Cell, RefCell};
@@ -27,8 +28,7 @@ pub struct RollStack {
     pub stack: gtk::Stack,
     widgets: Rc<RefCell<Vec<RollWidget>>>,
     active_idx: Rc<Cell<usize>>,
-    
-    // Callbacks to attach to new widgets
+
     cb_status: Rc<RefCell<Vec<Rc<dyn Fn(String)>>>>,
     cb_seek: Rc<RefCell<Vec<Rc<dyn Fn(f64)>>>>,
     cb_data_changed: Rc<RefCell<Vec<Rc<dyn Fn()>>>>,
@@ -63,11 +63,10 @@ impl RollStack {
         let widgets_clone = Rc::clone(&self.widgets);
         let active_idx_clone = Rc::clone(&self.active_idx);
         let cb_data_changed_ref = Rc::clone(&self.cb_data_changed);
-        
+
         let on_data_changed = move || {
             let current_idx = active_idx_clone.get();
-            
-            // First, fetch the updated MidiData from the active widget that triggered this
+
             let maybe_midi = if let Some(active_w) = widgets_clone.borrow().get(current_idx) {
                 match active_w {
                     RollWidget::Melodic(mw) => mw.get_data_clone(),
@@ -76,8 +75,7 @@ impl RollStack {
             } else {
                 None
             };
-            
-            // Second, distribute it to all OTHER widgets silently
+
             if let Some(midi) = maybe_midi {
                 for (i, w) in widgets_clone.borrow().iter().enumerate() {
                     if i != current_idx {
@@ -88,8 +86,7 @@ impl RollStack {
                     }
                 }
             }
-            
-            // Finally, call external listeners (e.g. window.rs)
+
             for cb in cb_data_changed_ref.borrow().iter() {
                 cb();
             }
@@ -142,8 +139,7 @@ impl RollStack {
 
     pub fn set_data(&self, midi: MidiData) {
         let mut widgets = self.widgets.borrow_mut();
-        
-        // Ensure existing widgets match the track mode
+
         for i in 0..widgets.len().min(midi.tracks.len()) {
             let is_drum = matches!(&midi.tracks[i].mode, crate::midi::TrackMode::Drum(_));
             let current_is_drum = matches!(&widgets[i], RollWidget::Drum(_));
@@ -156,34 +152,30 @@ impl RollStack {
             }
         }
 
-        // Adjust the number of widgets to match tracks
         while widgets.len() < midi.tracks.len() {
             let track_idx = widgets.len();
             let is_drum = matches!(&midi.tracks[track_idx].mode, crate::midi::TrackMode::Drum(_));
-            
             let new_widget = self.create_widget(track_idx, is_drum);
-            
             let name = format!("track_{}", track_idx);
             self.stack.add_named(new_widget.widget(), Some(&name));
             widgets.push(new_widget);
         }
-        
-        // Set data on all active widgets, then restore active_track which set_data resets to 0!
+
         for (i, w) in widgets.iter().enumerate() {
             if i < midi.tracks.len() {
                 match w {
                     RollWidget::Melodic(mw) => {
-                        mw.set_data(midi.clone());
+                        mw.set_midi(midi.clone());
                         mw.set_active_track(i);
                     }
                     RollWidget::Drum(dw) => {
-                        dw.set_data(midi.clone());
+                        dw.set_midi(midi.clone());
                         dw.set_active_track(i);
                     }
                 }
             }
         }
-        
+
         self.update_visible_child();
     }
 
@@ -256,11 +248,9 @@ impl RollStack {
         }
     }
 
-    // Callbacks
     pub fn connect_status<F: Fn(String) + 'static>(&self, f: F) {
         let rc = Rc::new(f);
         self.cb_status.borrow_mut().push(rc);
-        // Note: typically you should apply to existing widgets too
     }
 
     pub fn connect_seek<F: Fn(f64) + 'static>(&self, f: F) {
@@ -279,8 +269,12 @@ impl RollStack {
         for w in self.widgets.borrow().iter() {
             let cb = rc.clone();
             match w {
-                RollWidget::Melodic(mw) => mw.connect_preview_note_on(move |s, p, v, c| cb(s, p, v, c)),
-                RollWidget::Drum(dw) => dw.connect_preview_note_on(move |s, p, v, c| cb(s, p, v, c)),
+                RollWidget::Melodic(mw) => {
+                    mw.connect_preview_note_on(move |s, p, v, c| cb(s, p, v, c))
+                }
+                RollWidget::Drum(dw) => {
+                    dw.connect_preview_note_on(move |s, p, v, c| cb(s, p, v, c))
+                }
             }
         }
     }
@@ -302,11 +296,7 @@ impl RollStack {
         if let Some(w) = widgets.get(self.active_idx.get()) {
             match w {
                 RollWidget::Melodic(mw) => mw.get_edit_mode(),
-                RollWidget::Drum(dw) => match dw.get_edit_mode() {
-                    crate::drum_roll::types::EditMode::Select => EditMode::Select,
-                    crate::drum_roll::types::EditMode::Draw => EditMode::Draw,
-                    crate::drum_roll::types::EditMode::Put => EditMode::Put,
-                }
+                RollWidget::Drum(dw) => dw.get_edit_mode(),
             }
         } else {
             EditMode::Draw
@@ -386,7 +376,13 @@ impl RollStack {
         self.stack.grab_focus();
     }
 
-    pub fn put_midi_note_on(&self, channel: u8, pitch: u8, velocity: u8, occurred_at: std::time::Instant) -> bool {
+    pub fn put_midi_note_on(
+        &self,
+        channel: u8,
+        pitch: u8,
+        velocity: u8,
+        occurred_at: std::time::Instant,
+    ) -> bool {
         let widgets = self.widgets.borrow();
         if let Some(w) = widgets.get(self.active_idx.get()) {
             match w {

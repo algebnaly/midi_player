@@ -6,8 +6,8 @@
 //! # Architecture
 //!
 //! ```text
-//! main.rs  →  window.rs (GTK UI)
-//!                 ├── piano_roll.rs   (custom piano-roll widget)
+//! main.rs  →  window/ (GTK UI)
+//!                 ├── roll_stack.rs   (piano / drum Views)
 //!                 └── player.rs       (playback façade)
 //!                         ├── audio_engine.rs  (CPAL stream)
 //!                         ├── sequencer.rs     (MIDI event scheduling)
@@ -26,6 +26,7 @@ mod midi;
 mod midi_input;
 mod piano_roll;
 mod drum_roll;
+mod roll;
 mod roll_stack;
 mod player;
 mod project;
