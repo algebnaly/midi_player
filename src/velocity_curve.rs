@@ -17,9 +17,45 @@ impl VelocityPoint {
 }
 
 pub fn default_velocity_points() -> Vec<VelocityPoint> {
+    // linear_velocity_points()
+    soft_velocity_points()
+}
+
+/// Standard 1:1 linear response.
+pub fn linear_velocity_points() -> Vec<VelocityPoint> {
     vec![
         VelocityPoint::new(0.0, 0.0),
         VelocityPoint::new(0.5, 0.5),
+        VelocityPoint::new(1.0, 1.0),
+    ]
+}
+
+/// Soft touch preset (concave): easier to achieve higher velocities.
+pub fn soft_velocity_points() -> Vec<VelocityPoint> {
+    vec![
+        VelocityPoint::new(0.0, 0.0),
+        VelocityPoint::new(0.25, 0.45),
+        VelocityPoint::new(0.5, 0.75),
+        VelocityPoint::new(1.0, 1.0),
+    ]
+}
+
+/// Hard touch preset (convex): requires greater force to achieve higher velocities.
+pub fn hard_velocity_points() -> Vec<VelocityPoint> {
+    vec![
+        VelocityPoint::new(0.0, 0.0),
+        VelocityPoint::new(0.5, 0.25),
+        VelocityPoint::new(0.75, 0.55),
+        VelocityPoint::new(1.0, 1.0),
+    ]
+}
+
+/// S-curve preset: compressed dynamics with natural transitions.
+pub fn s_curve_velocity_points() -> Vec<VelocityPoint> {
+    vec![
+        VelocityPoint::new(0.0, 0.0),
+        VelocityPoint::new(0.25, 0.12),
+        VelocityPoint::new(0.75, 0.88),
         VelocityPoint::new(1.0, 1.0),
     ]
 }
@@ -59,6 +95,10 @@ impl VelocityCurve {
         }
 
         for input_velocity in 0..=127 {
+            if input_velocity == 0 {
+                self.lookup[0].store(0, Ordering::Relaxed);
+                continue;
+            }
             let input = input_velocity as f64 / 127.0;
             let right = points.partition_point(|point| point.input < input);
             let output = if right == 0 {
@@ -76,7 +116,8 @@ impl VelocityCurve {
                 };
                 left.output + (right.output - left.output) * amount
             };
-            let mapped = (output.clamp(0.0, 1.0) * 127.0).round() as u8;
+            // Ensure non-zero input velocity never maps to 0 (which MIDI treats as NoteOff).
+            let mapped = ((output.clamp(0.0, 1.0) * 127.0).round() as u8).max(1);
             self.lookup[input_velocity].store(mapped, Ordering::Relaxed);
         }
     }
@@ -107,5 +148,18 @@ mod tests {
         assert!((curve.map(32) as i16 - 64).abs() <= 1);
         assert_eq!(curve.map(64), 127);
         assert_eq!(curve.map(127), 127);
+    }
+
+    #[test]
+    fn non_zero_velocity_never_maps_to_zero() {
+        let curve = VelocityCurve::default();
+        curve.set_points(&[
+            VelocityPoint::new(0.0, 0.0),
+            VelocityPoint::new(0.5, 0.0),
+            VelocityPoint::new(1.0, 1.0),
+        ]);
+        assert_eq!(curve.map(0), 0);
+        assert!(curve.map(1) >= 1);
+        assert!(curve.map(32) >= 1);
     }
 }

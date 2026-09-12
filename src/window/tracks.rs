@@ -69,6 +69,38 @@ pub fn wire_track_controls(
         tracks_solo.roll.update_data_and_notify(midi);
     });
 
+    let tracks_vol = tracks.clone();
+    panel.volume_scale.connect_value_changed(move |scale| {
+        if tracks_vol.syncing.get() {
+            return;
+        }
+        let Some(mut midi) = tracks_vol.roll.get_data_clone() else {
+            return;
+        };
+        let index = tracks_vol.roll.active_track_index();
+        let Some(track) = midi.tracks.get_mut(index) else {
+            return;
+        };
+        track.mixer.volume_db = scale.value() as f32;
+        tracks_vol.roll.update_data_and_notify(midi);
+    });
+
+    let tracks_pan = tracks.clone();
+    panel.pan_scale.connect_value_changed(move |scale| {
+        if tracks_pan.syncing.get() {
+            return;
+        }
+        let Some(mut midi) = tracks_pan.roll.get_data_clone() else {
+            return;
+        };
+        let index = tracks_pan.roll.active_track_index();
+        let Some(track) = midi.tracks.get_mut(index) else {
+            return;
+        };
+        track.mixer.pan = scale.value() as f32;
+        tracks_pan.roll.update_data_and_notify(midi);
+    });
+
     let tracks_arm = tracks.clone();
     let midi_manager_arm = midi_manager.clone();
     panel.arm_btn.connect_toggled(move |button| {
@@ -305,6 +337,10 @@ pub fn wire_track_controls(
                 tracks_select.mute.set_active(track.mixer.mute);
                 tracks_select.solo.set_active(track.mixer.solo);
                 tracks_select.arm.set_active(track.input.armed);
+                tracks_select
+                    .volume_scale
+                    .set_value(track.mixer.volume_db as f64);
+                tracks_select.pan_scale.set_value(track.mixer.pan as f64);
                 tracks_select.syncing.set(was_syncing);
             }
             if !tracks_select.syncing.get() {

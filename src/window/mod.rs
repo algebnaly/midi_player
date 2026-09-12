@@ -146,6 +146,8 @@ pub fn build_ui(app: &gtk::Application, initial_file: Option<String>) {
         mute: track_panel.mute_btn.clone(),
         solo: track_panel.solo_btn.clone(),
         arm: track_panel.arm_btn.clone(),
+        volume_scale: track_panel.volume_scale.clone(),
+        pan_scale: track_panel.pan_scale.clone(),
         syncing: syncing_tracks,
     };
 

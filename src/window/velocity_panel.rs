@@ -6,7 +6,10 @@ use gtk4 as gtk;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crate::velocity_curve::{VelocityCurve, VelocityPoint, default_velocity_points};
+use crate::velocity_curve::{
+    VelocityCurve, VelocityPoint, default_velocity_points, hard_velocity_points,
+    linear_velocity_points, s_curve_velocity_points, soft_velocity_points,
+};
 
 use super::overlay::make_floating_panel_draggable;
 
@@ -16,7 +19,7 @@ pub fn attach_velocity_panel(
     velocity_curve: VelocityCurve,
 ) {
     let velocity_panel = Box::new(gtk::Orientation::Vertical, 6);
-    velocity_panel.set_size_request(430, 360);
+    velocity_panel.set_size_request(450, 400);
     velocity_panel.set_halign(gtk::Align::Start);
     velocity_panel.set_valign(gtk::Align::Start);
     velocity_panel.set_margin_top(48);
@@ -38,6 +41,26 @@ pub fn attach_velocity_panel(
     velocity_panel_header.append(&reset_velocity_btn);
     velocity_panel_header.append(&close_toggle_btn);
     velocity_panel.append(&velocity_panel_header);
+
+    let presets_box = Box::new(gtk::Orientation::Horizontal, 4);
+    let preset_label = Label::new(Some("Presets:"));
+    preset_label.add_css_class("panel-hint");
+    presets_box.append(&preset_label);
+
+    let linear_btn = Button::with_label("Linear");
+    linear_btn.set_tooltip_text(Some("Standard linear response (1:1)"));
+    let soft_btn = Button::with_label("Soft");
+    soft_btn.set_tooltip_text(Some("Easier to hit higher velocities (concave)"));
+    let hard_btn = Button::with_label("Hard");
+    hard_btn.set_tooltip_text(Some("Requires harder strike for high velocities (convex)"));
+    let s_curve_btn = Button::with_label("S-Curve");
+    s_curve_btn.set_tooltip_text(Some("Compressed dynamic response (S-curve)"));
+
+    presets_box.append(&linear_btn);
+    presets_box.append(&soft_btn);
+    presets_box.append(&hard_btn);
+    presets_box.append(&s_curve_btn);
+    velocity_panel.append(&presets_box);
 
     let velocity_hint = Label::new(Some(
         "Drag points to shape the response · Double-click to add a point",
@@ -217,6 +240,42 @@ pub fn attach_velocity_panel(
         *points_reset.borrow_mut() = default_velocity_points();
         curve_reset.set_points(&points_reset.borrow());
         area_reset.queue_draw();
+    });
+
+    let points_linear = velocity_points.clone();
+    let area_linear = velocity_area.clone();
+    let curve_linear = velocity_curve.clone();
+    linear_btn.connect_clicked(move |_| {
+        *points_linear.borrow_mut() = linear_velocity_points();
+        curve_linear.set_points(&points_linear.borrow());
+        area_linear.queue_draw();
+    });
+
+    let points_soft = velocity_points.clone();
+    let area_soft = velocity_area.clone();
+    let curve_soft = velocity_curve.clone();
+    soft_btn.connect_clicked(move |_| {
+        *points_soft.borrow_mut() = soft_velocity_points();
+        curve_soft.set_points(&points_soft.borrow());
+        area_soft.queue_draw();
+    });
+
+    let points_hard = velocity_points.clone();
+    let area_hard = velocity_area.clone();
+    let curve_hard = velocity_curve.clone();
+    hard_btn.connect_clicked(move |_| {
+        *points_hard.borrow_mut() = hard_velocity_points();
+        curve_hard.set_points(&points_hard.borrow());
+        area_hard.queue_draw();
+    });
+
+    let points_s_curve = velocity_points.clone();
+    let area_s_curve = velocity_area.clone();
+    let curve_s_curve = velocity_curve.clone();
+    s_curve_btn.connect_clicked(move |_| {
+        *points_s_curve.borrow_mut() = s_curve_velocity_points();
+        curve_s_curve.set_points(&points_s_curve.borrow());
+        area_s_curve.queue_draw();
     });
 
     let velocity_panel_toggle = velocity_panel.clone();

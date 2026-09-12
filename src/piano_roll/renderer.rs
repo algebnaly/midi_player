@@ -58,7 +58,7 @@ pub fn render_notes(
                 let (x, y, w, h) = (x as f32, y as f32, w as f32, h as f32);
 
                 if x + w > kw && x < width && y + h > 0.0 && y < height {
-                    let note_color = if is_active {
+                    let base_color = if is_active {
                         if selected_notes.contains(&n_idx) {
                             &theme.note_selected
                         } else {
@@ -67,7 +67,18 @@ pub fn render_notes(
                     } else {
                         &theme.note_inactive
                     };
-                    snapshot.append_color(note_color, &graphene::Rect::new(x, y, w, h));
+                    let note_color = if is_active && !selected_notes.contains(&n_idx) {
+                        let vel_scale = 0.65 + 0.5 * (note.velocity as f32 / 127.0);
+                        gtk::gdk::RGBA::new(
+                            (base_color.red() * vel_scale).clamp(0.0, 1.0),
+                            (base_color.green() * vel_scale).clamp(0.0, 1.0),
+                            (base_color.blue() * vel_scale).clamp(0.0, 1.0),
+                            base_color.alpha(),
+                        )
+                    } else {
+                        *base_color
+                    };
+                    snapshot.append_color(&note_color, &graphene::Rect::new(x, y, w, h));
 
                     let bc = if is_active {
                         &theme.note_border_active

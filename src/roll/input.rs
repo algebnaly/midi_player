@@ -759,6 +759,44 @@ fn handle_key_press<W: RollView>(widget: &W, keyval: gdk::Key) -> glib::Propagat
     }
 
     let mut changed = false;
+    // Velocity adjustment for selected notes:
+    // '=' / '+' / ']' to increase velocity (+5 or +10),
+    // '-' / '_' / '[' to decrease velocity (-5 or -10).
+    let vel_delta: Option<i16> = match keyval {
+        gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add => Some(5),
+        gdk::Key::bracketright => Some(10),
+        gdk::Key::minus | gdk::Key::underscore | gdk::Key::KP_Subtract => Some(-5),
+        gdk::Key::bracketleft => Some(-10),
+        _ => None,
+    };
+
+    if let Some(delta) = vel_delta {
+        let indices: Vec<usize> = s.selected_notes.borrow().iter().copied().collect();
+        if !indices.is_empty() {
+            if let Some(midi) = &mut *s.data.borrow_mut() {
+                let act = *s.active_track.borrow();
+                if act < midi.tracks.len() {
+                    for &idx in &indices {
+                        if let Some(note) = midi.tracks[act].notes.get_mut(idx) {
+                            note.velocity = (note.velocity as i16 + delta).clamp(1, 127) as u8;
+                        }
+                    }
+                    widget.redraw();
+                    changed = true;
+                    // Provide audible preview with adjusted velocity on first selected note
+                    if let Some(&first_idx) = indices.first()
+                        && let Some(note) = midi.tracks[act].notes.get(first_idx)
+                    {
+                        let synth_index = widget.active_synth_index();
+                        if let Some(cb) = &*s.preview_note_on_callback.borrow() {
+                            cb(synth_index, note.pitch, note.velocity, channel);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if keyval == gdk::Key::Delete || keyval == gdk::Key::BackSpace {
         let indices: Vec<usize> = s.selected_notes.borrow().iter().copied().collect();
         if !indices.is_empty() {

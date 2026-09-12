@@ -12,6 +12,7 @@
 use crate::clap_audio::buffers::HostAudioBuffers;
 use crate::clap_audio::config::FullAudioConfig;
 use clack_extensions::gui::{GuiApiType, GuiConfiguration, PluginGui};
+use clack_extensions::note_ports::{NoteDialects, NotePortInfoBuffer, PluginNotePorts};
 use clack_host::prelude::*;
 use std::error::Error;
 use std::sync::Arc;
@@ -44,6 +45,8 @@ pub struct ClapPluginWrapper {
     /// Pre-allocated interleave buffer, avoids heap allocation in the
     /// real-time audio callback.  Grown on demand (should only happen once).
     mux_buffer: Vec<f32>,
+    /// Whether this plugin only supports raw MIDI dialect instead of CLAP note events.
+    uses_midi_dialect: bool,
 }
 
 /// Main-thread handle that retains the `PluginInstance` for GUI operations.
@@ -106,6 +109,23 @@ impl ClapPluginWrapper {
         // Probe for GUI extension before activation.
         let gui_extension = instance.plugin_shared_handle().get_extension::<PluginGui>();
 
+        // Probe note ports to determine if the plugin only supports MIDI dialect.
+        let uses_midi_dialect = if let Some(ports_ext) = instance
+            .plugin_shared_handle()
+            .get_extension::<PluginNotePorts>()
+        {
+            let mut plugin_handle = instance.plugin_handle();
+            let mut buf = NotePortInfoBuffer::new();
+            if let Some(info) = ports_ext.get(&mut plugin_handle, 0, true, &mut buf) {
+                !info.supported_dialects.contains(NoteDialects::CLAP)
+                    && info.supported_dialects.contains(NoteDialects::MIDI)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         let config = Self::build_audio_config(sample_rate);
 
         let audio_processor = instance
@@ -121,6 +141,7 @@ impl ClapPluginWrapper {
             playing: true,
             active_notes: [[false; 128]; 16],
             mux_buffer: vec![0.0f32; 4096],
+            uses_midi_dialect,
         };
 
         let gui_handle = ClapPluginGuiHandle {
@@ -135,34 +156,38 @@ impl ClapPluginWrapper {
 
     /// Queue a MIDI Note-On event to be delivered on the next render call.
     pub fn send_note_on(&mut self, channel: u8, key: u8, velocity: u8) {
-        // Send CLAP dialect NoteOn
-        use clack_host::events::event_types::NoteOnEvent;
-        use clack_host::events::{Match, Pckn};
-        let pckn = Pckn::new(Match::All, channel as u16, key as u16, Match::All);
-        let event = NoteOnEvent::new(0, pckn, velocity as f64 / 127.0);
-        self.pending_events.push(&event);
-
-        // Also send raw MIDI NoteOn (some plugins only respond to MIDI dialect)
-        use clack_host::events::event_types::MidiEvent;
-        let midi = MidiEvent::new(0, 0, [0x90 | (channel & 0x0F), key, velocity]);
-        self.pending_events.push(&midi);
+        if self.uses_midi_dialect {
+            // Plugin only supports raw MIDI dialect
+            use clack_host::events::event_types::MidiEvent;
+            let midi = MidiEvent::new(0, 0, [0x90 | (channel & 0x0F), key, velocity]);
+            self.pending_events.push(&midi);
+        } else {
+            // Standard CLAP dialect NoteOn
+            use clack_host::events::event_types::NoteOnEvent;
+            use clack_host::events::{Match, Pckn};
+            let pckn = Pckn::new(Match::All, channel as u16, key as u16, Match::All);
+            let event = NoteOnEvent::new(0, pckn, velocity as f64 / 127.0);
+            self.pending_events.push(&event);
+        }
 
         self.active_notes[channel as usize & 0x0F][key as usize & 0x7F] = true;
     }
 
     /// Queue a MIDI Note-Off event to be delivered on the next render call.
     pub fn send_note_off(&mut self, channel: u8, key: u8) {
-        // Send CLAP dialect NoteOff
-        use clack_host::events::event_types::NoteOffEvent;
-        use clack_host::events::{Match, Pckn};
-        let pckn = Pckn::new(Match::All, channel as u16, key as u16, Match::All);
-        let event = NoteOffEvent::new(0, pckn, 0.0);
-        self.pending_events.push(&event);
-
-        // Also send raw MIDI NoteOff
-        use clack_host::events::event_types::MidiEvent;
-        let midi = MidiEvent::new(0, 0, [0x80 | (channel & 0x0F), key, 0]);
-        self.pending_events.push(&midi);
+        if self.uses_midi_dialect {
+            // Plugin only supports raw MIDI dialect
+            use clack_host::events::event_types::MidiEvent;
+            let midi = MidiEvent::new(0, 0, [0x80 | (channel & 0x0F), key, 0]);
+            self.pending_events.push(&midi);
+        } else {
+            // Standard CLAP dialect NoteOff
+            use clack_host::events::event_types::NoteOffEvent;
+            use clack_host::events::{Match, Pckn};
+            let pckn = Pckn::new(Match::All, channel as u16, key as u16, Match::All);
+            let event = NoteOffEvent::new(0, pckn, 0.0);
+            self.pending_events.push(&event);
+        }
 
         self.active_notes[channel as usize & 0x0F][key as usize & 0x7F] = false;
     }

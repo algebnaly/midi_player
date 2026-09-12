@@ -124,6 +124,8 @@ pub struct TrackUi {
     pub mute: ToggleButton,
     pub solo: ToggleButton,
     pub arm: ToggleButton,
+    pub volume_scale: gtk::Scale,
+    pub pan_scale: gtk::Scale,
     pub syncing: Rc<Cell<bool>>,
 }
 
@@ -143,6 +145,8 @@ impl TrackUi {
         self.mute.set_active(selected.mixer.mute);
         self.solo.set_active(selected.mixer.solo);
         self.arm.set_active(selected.input.armed);
+        self.volume_scale.set_value(selected.mixer.volume_db as f64);
+        self.pan_scale.set_value(selected.mixer.pan as f64);
         self.syncing.set(false);
 
         if notify {

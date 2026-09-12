@@ -55,6 +55,8 @@ pub struct CustomSequencer {
     /// new target state instead of blindly re-triggering everything.
     /// Key: (track_index, channel, pitch) → (synth_index, velocity).
     active_notes: HashMap<NoteKey, (usize, u8)>,
+    /// Mixer settings per synth index: `(gain, pan_l, pan_r)`.
+    synth_mixers: HashMap<usize, (f32, f32, f32)>,
 }
 
 impl CustomSequencer {
@@ -68,6 +70,7 @@ impl CustomSequencer {
             track_buf_l: vec![0.0f32; 4096],
             track_buf_r: vec![0.0f32; 4096],
             active_notes: HashMap::new(),
+            synth_mixers: HashMap::new(),
         }
     }
 
@@ -81,6 +84,7 @@ impl CustomSequencer {
         self.playhead_time = 0.0;
         self.loop_end_time = Self::compute_loop_end(data);
         self.active_notes.clear();
+        self.update_synth_mixers(data);
     }
 
     /// Replace the event list without clearing `active_notes`.
@@ -95,6 +99,23 @@ impl CustomSequencer {
         self.playhead_time = 0.0;
         self.loop_end_time = Self::compute_loop_end(data);
         // Deliberately do NOT clear active_notes — seek() will diff.
+        self.update_synth_mixers(data);
+    }
+
+    fn update_synth_mixers(&mut self, data: &MidiData) {
+        self.synth_mixers.clear();
+        for track in &data.tracks {
+            let gain = if track.mixer.volume_db <= -60.0 {
+                0.0
+            } else {
+                10.0f32.powf(track.mixer.volume_db / 20.0)
+            };
+            let pan = track.mixer.pan.clamp(-1.0, 1.0);
+            let pan_l = (1.0 - pan).min(1.0);
+            let pan_r = (1.0 + pan).min(1.0);
+            self.synth_mixers
+                .insert(track.synth_index, (gain, pan_l, pan_r));
+        }
     }
 
     /// Reset the playhead to the beginning without changing the event list.
@@ -289,14 +310,22 @@ impl CustomSequencer {
                 let track_left = &mut self.track_buf_l[..chunk_frames];
                 let track_right = &mut self.track_buf_r[..chunk_frames];
 
-                for synth in synths.iter_mut() {
+                for (synth_idx, synth) in synths.iter_mut().enumerate() {
                     track_left.fill(0.0);
                     track_right.fill(0.0);
                     synth.render(track_left, track_right);
 
+                    let (gain, pan_l, pan_r) = self
+                        .synth_mixers
+                        .get(&synth_idx)
+                        .copied()
+                        .unwrap_or((1.0, 1.0, 1.0));
+                    let gain_l = gain * pan_l;
+                    let gain_r = gain * pan_r;
+
                     for i in 0..chunk_frames {
-                        left[frames_rendered + i] += track_left[i];
-                        right[frames_rendered + i] += track_right[i];
+                        left[frames_rendered + i] += track_left[i] * gain_l;
+                        right[frames_rendered + i] += track_right[i] * gain_r;
                     }
                 }
 
@@ -444,5 +473,33 @@ mod tests {
         );
         assert_eq!(sequencer.active_pitches_for_track(TrackId(20)), vec![67]);
         assert!(sequencer.active_pitches_for_track(TrackId(30)).is_empty());
+    }
+
+    #[test]
+    fn synth_mixers_calculated_correctly_on_load() {
+        let mut sequencer = CustomSequencer::new();
+        let mut data = MidiData::new_empty(&["Piano".into(), "Bass".into()]);
+        data.tracks[0].synth_index = 0;
+        data.tracks[0].mixer.volume_db = -6.0;
+        data.tracks[0].mixer.pan = -0.5;
+
+        data.tracks[1].synth_index = 1;
+        data.tracks[1].mixer.volume_db = 0.0;
+        data.tracks[1].mixer.pan = 0.5;
+
+        sequencer.load(&data);
+
+        let m0 = sequencer.synth_mixers.get(&0).unwrap();
+        // -6dB is approx 0.501187
+        assert!((m0.0 - 0.5012).abs() < 0.01);
+        // pan = -0.5 -> pan_l = 1.0, pan_r = 0.5
+        assert_eq!(m0.1, 1.0);
+        assert_eq!(m0.2, 0.5);
+
+        let m1 = sequencer.synth_mixers.get(&1).unwrap();
+        assert!((m1.0 - 1.0).abs() < 0.001);
+        // pan = 0.5 -> pan_l = 0.5, pan_r = 1.0
+        assert_eq!(m1.1, 0.5);
+        assert_eq!(m1.2, 1.0);
     }
 }

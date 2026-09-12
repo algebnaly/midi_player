@@ -12,6 +12,8 @@ pub struct TrackPanel {
     pub mute_btn: ToggleButton,
     pub solo_btn: ToggleButton,
     pub arm_btn: ToggleButton,
+    pub volume_scale: gtk::Scale,
+    pub pan_scale: gtk::Scale,
     pub rename_btn: Button,
     pub add_btn: Button,
     pub duplicate_btn: Button,
@@ -23,7 +25,7 @@ pub struct TrackPanel {
 
 pub fn attach_track_panel(overlay: &gtk::Overlay, toggle_btn: &ToggleButton) -> TrackPanel {
     let track_panel = Box::new(gtk::Orientation::Vertical, 6);
-    track_panel.set_size_request(260, 560);
+    track_panel.set_size_request(280, 620);
     track_panel.set_halign(gtk::Align::Start);
     track_panel.set_valign(gtk::Align::Start);
     track_panel.set_margin_top(12);
@@ -57,6 +59,34 @@ pub fn attach_track_panel(overlay: &gtk::Overlay, toggle_btn: &ToggleButton) -> 
     track_state_row.append(&solo_btn);
     track_state_row.append(&arm_btn);
     track_panel.append(&track_state_row);
+
+    let vol_box = Box::new(gtk::Orientation::Horizontal, 4);
+    let vol_label = Label::new(Some("Vol:"));
+    vol_label.set_width_request(28);
+    let volume_adj = gtk::Adjustment::new(0.0, -36.0, 12.0, 0.5, 2.0, 0.0);
+    let volume_scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&volume_adj));
+    volume_scale.set_digits(1);
+    volume_scale.set_draw_value(true);
+    volume_scale.set_value_pos(gtk::PositionType::Right);
+    volume_scale.set_hexpand(true);
+    volume_scale.set_tooltip_text(Some("Track Volume (dB)"));
+    vol_box.append(&vol_label);
+    vol_box.append(&volume_scale);
+    track_panel.append(&vol_box);
+
+    let pan_box = Box::new(gtk::Orientation::Horizontal, 4);
+    let pan_label = Label::new(Some("Pan:"));
+    pan_label.set_width_request(28);
+    let pan_adj = gtk::Adjustment::new(0.0, -1.0, 1.0, 0.05, 0.2, 0.0);
+    let pan_scale = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&pan_adj));
+    pan_scale.set_digits(2);
+    pan_scale.set_draw_value(true);
+    pan_scale.set_value_pos(gtk::PositionType::Right);
+    pan_scale.set_hexpand(true);
+    pan_scale.set_tooltip_text(Some("Track Pan (-1.0 Left to +1.0 Right)"));
+    pan_box.append(&pan_label);
+    pan_box.append(&pan_scale);
+    track_panel.append(&pan_box);
 
     let list_box = gtk::ListBox::new();
     list_box.set_selection_mode(gtk::SelectionMode::Single);
@@ -113,6 +143,8 @@ pub fn attach_track_panel(overlay: &gtk::Overlay, toggle_btn: &ToggleButton) -> 
         mute_btn,
         solo_btn,
         arm_btn,
+        volume_scale,
+        pan_scale,
         rename_btn,
         add_btn,
         duplicate_btn,

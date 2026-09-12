@@ -232,7 +232,7 @@ fn handle_message(
         return;
     };
     if let LiveMidiEvent::NoteOn { velocity, .. } = &mut message {
-        *velocity = velocity_curve.map(*velocity);
+        *velocity = velocity_curve.map(*velocity).max(1);
     }
 
     match message {
