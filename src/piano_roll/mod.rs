@@ -52,11 +52,14 @@ mod imp {
             let theme = default_theme();
             let active_track_idx = *self.inner.active_track.borrow();
 
+            let lane_h = crate::roll::types::PEDAL_LANE_HEIGHT as f32;
+            let roll_height = (height - lane_h).max(0.0);
+
             snapshot.append_color(
                 &theme.background,
                 &graphene::Rect::new(0.0, 0.0, width, height),
             );
-            snapshot.push_clip(&graphene::Rect::new(kw, 0.0, width - kw, height));
+            snapshot.push_clip(&graphene::Rect::new(kw, 0.0, width - kw, roll_height));
 
             renderer::render_pitch_lines(snapshot, &vp, &theme);
             if let Some(midi) = &*self.inner.data.borrow() {
@@ -70,12 +73,6 @@ mod imp {
                     &theme,
                 );
             }
-            shared_renderer::render_playhead(
-                snapshot,
-                &vp,
-                *self.inner.playhead_time.borrow(),
-                &theme,
-            );
             if let Some(sel) = &*self.inner.selection_rect.borrow() {
                 shared_renderer::render_selection_rect::<MelodicLayout>(
                     snapshot,
@@ -87,6 +84,25 @@ mod imp {
                 );
             }
             snapshot.pop();
+
+            // Render pedal lane at the bottom
+            if let Some(midi) = &*self.inner.data.borrow() {
+                renderer::render_pedal_lane(
+                    snapshot,
+                    &vp,
+                    midi,
+                    active_track_idx,
+                    &*self.inner.drag_state.borrow(),
+                    &theme,
+                );
+            }
+
+            shared_renderer::render_playhead(
+                snapshot,
+                &vp,
+                *self.inner.playhead_time.borrow(),
+                &theme,
+            );
 
             let pango_ctx = obj.pango_context();
             let active_pitches = shared_renderer::keyboard_active_pitches(
@@ -105,7 +121,17 @@ mod imp {
                     )
                     .chain(self.inner.playback_active_pitches.borrow().iter().copied()),
             );
+            snapshot.push_clip(&graphene::Rect::new(0.0, 0.0, kw, roll_height));
             keyboard::render_keyboard(snapshot, &vp, &pango_ctx, &active_pitches, &theme);
+            snapshot.pop();
+
+            keyboard::render_pedal_sidebar(
+                snapshot,
+                &vp,
+                &pango_ctx,
+                *self.inner.pedal_active.borrow(),
+                &theme,
+            );
         }
     }
 }

@@ -454,6 +454,25 @@ impl Player {
         }
     }
 
+    /// Send a preview Control Change to the synth at `synth_index`.
+    pub fn preview_control_change(
+        &self,
+        synth_index: usize,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    ) {
+        if let Ok(mut synths) = self.synths.lock() {
+            let idx = synth_index % synths.len();
+            if let Some(synth) = synths.get_mut(idx) {
+                synth.send_midi_event(
+                    channel,
+                    &crate::midi::MidiEventType::ControlChange { controller, value },
+                );
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // Plugin GUI
     // ------------------------------------------------------------------

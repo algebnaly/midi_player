@@ -49,6 +49,7 @@ pub struct RollState {
     pub put_length_quantization_enabled: RefCell<bool>,
 
     pub default_note_beats: RefCell<f64>,
+    pub pedal_active: RefCell<bool>,
 
     #[allow(clippy::type_complexity)]
     pub seek_callback: RefCell<Option<Box<dyn Fn(f64)>>>,
@@ -58,6 +59,8 @@ pub struct RollState {
     pub preview_note_on_callback: RefCell<Option<Box<dyn Fn(usize, u8, u8, u8)>>>,
     #[allow(clippy::type_complexity)]
     pub preview_note_off_callback: RefCell<Option<Box<dyn Fn(usize, u8, u8)>>>,
+    #[allow(clippy::type_complexity)]
+    pub preview_control_change_callback: RefCell<Option<Box<dyn Fn(usize, u8, u8, u8)>>>,
     #[allow(clippy::type_complexity)]
     pub status_callback: RefCell<Option<Box<dyn Fn(&str)>>>,
 }
@@ -87,10 +90,12 @@ impl Default for RollState {
             pending_put_notes: RefCell::new(HashMap::new()),
             put_length_quantization_enabled: RefCell::new(false),
             default_note_beats: RefCell::new(1.0),
+            pedal_active: RefCell::new(false),
             seek_callback: RefCell::new(None),
             data_changed_callback: RefCell::new(None),
             preview_note_on_callback: RefCell::new(None),
             preview_note_off_callback: RefCell::new(None),
+            preview_control_change_callback: RefCell::new(None),
             status_callback: RefCell::new(None),
         }
     }
@@ -111,6 +116,15 @@ impl RollState {
 
     pub fn connect_preview_note_off<F: Fn(usize, u8, u8) + 'static>(&self, f: F) {
         *self.preview_note_off_callback.borrow_mut() = Some(Box::new(f));
+    }
+
+    pub fn connect_preview_control_change<F: Fn(usize, u8, u8, u8) + 'static>(&self, f: F) {
+        *self.preview_control_change_callback.borrow_mut() = Some(Box::new(f));
+    }
+
+    pub fn set_pedal_active(&self, active: bool) {
+        *self.pedal_active.borrow_mut() = active;
+        self.update_status();
     }
 
     pub fn connect_status<F: Fn(&str) + 'static>(&self, f: F) {
@@ -241,7 +255,7 @@ impl RollState {
         } else {
             self.edit_mode.borrow().label()
         };
-        let msg = if let Some(status) = keyboard_status {
+        let mut msg = if let Some(status) = keyboard_status {
             if sel_count > 0 {
                 format!("{status}  {sel_count} note(s) selected")
             } else {
@@ -252,6 +266,9 @@ impl RollState {
         } else {
             format!("[{mode_status}]")
         };
+        if *self.pedal_active.borrow() {
+            msg.push_str(" [PEDAL]");
+        }
         if let Some(cb) = &*self.status_callback.borrow() {
             cb(&msg);
         }

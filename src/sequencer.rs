@@ -55,6 +55,8 @@ pub struct CustomSequencer {
     /// new target state instead of blindly re-triggering everything.
     /// Key: (track_index, channel, pitch) → (synth_index, velocity).
     active_notes: HashMap<NoteKey, (usize, u8)>,
+    /// Control changes currently active (synth_index, channel, controller) → value.
+    active_controllers: HashMap<(usize, u8, u8), u8>,
     /// Mixer settings per synth index: `(gain, pan_l, pan_r)`.
     synth_mixers: HashMap<usize, (f32, f32, f32)>,
 }
@@ -70,6 +72,7 @@ impl CustomSequencer {
             track_buf_l: vec![0.0f32; 4096],
             track_buf_r: vec![0.0f32; 4096],
             active_notes: HashMap::new(),
+            active_controllers: HashMap::new(),
             synth_mixers: HashMap::new(),
         }
     }
@@ -84,6 +87,7 @@ impl CustomSequencer {
         self.playhead_time = 0.0;
         self.loop_end_time = Self::compute_loop_end(data);
         self.active_notes.clear();
+        self.active_controllers.clear();
         self.update_synth_mixers(data);
     }
 
@@ -144,6 +148,7 @@ impl CustomSequencer {
 
         // Compute the set of notes that *should* be active at `time`.
         let mut target_active: HashMap<NoteKey, (usize, u8)> = HashMap::new();
+        let mut target_ccs: HashMap<(usize, u8, u8), u8> = HashMap::new();
 
         self.current_event_idx = 0;
         while self.current_event_idx < self.events.len()
@@ -160,9 +165,41 @@ impl CustomSequencer {
                 crate::midi::MidiEventType::NoteOff { pitch } => {
                     target_active.remove(&(ev.track_id, ev.channel, *pitch));
                 }
+                crate::midi::MidiEventType::ControlChange { controller, value } => {
+                    target_ccs.insert((ev.synth_index, ev.channel, *controller), *value);
+                }
             }
             self.current_event_idx += 1;
         }
+
+        for (&(synth_index, channel, controller), _) in &self.active_controllers {
+            if !target_ccs.contains_key(&(synth_index, channel, controller)) {
+                send_to_synth(
+                    synths,
+                    synth_index,
+                    channel,
+                    &crate::midi::MidiEventType::ControlChange {
+                        controller,
+                        value: 0,
+                    },
+                );
+            }
+        }
+        for (&(synth_index, channel, controller), &value) in &target_ccs {
+            if self
+                .active_controllers
+                .get(&(synth_index, channel, controller))
+                != Some(&value)
+            {
+                send_to_synth(
+                    synths,
+                    synth_index,
+                    channel,
+                    &crate::midi::MidiEventType::ControlChange { controller, value },
+                );
+            }
+        }
+        self.active_controllers = target_ccs;
 
         let old_outputs = output_note_set(&self.active_notes);
         let target_outputs = output_note_set(&target_active);
@@ -231,18 +268,10 @@ impl CustomSequencer {
             while self.current_event_idx < self.events.len() {
                 let ev = &self.events[self.current_event_idx];
                 if ev.time_seconds <= self.playhead_time + EVENT_DISPATCH_TOLERANCE_SECS {
-                    // Update active_notes tracking.
-                    let key: NoteKey = (
-                        ev.track_id,
-                        ev.channel,
-                        match &ev.event_type {
-                            crate::midi::MidiEventType::NoteOn { pitch, .. } => *pitch,
-                            crate::midi::MidiEventType::NoteOff { pitch } => *pitch,
-                        },
-                    );
                     match &ev.event_type {
-                        crate::midi::MidiEventType::NoteOn { velocity, .. } => {
-                            let output_key = (ev.synth_index, ev.channel, key.2);
+                        crate::midi::MidiEventType::NoteOn { velocity, pitch } => {
+                            let key: NoteKey = (ev.track_id, ev.channel, *pitch);
+                            let output_key = (ev.synth_index, ev.channel, *pitch);
                             let already_sounding = self.is_note_active(output_key)
                                 || live_owns_output(live_notes, output_key);
                             self.active_notes.insert(key, (ev.synth_index, *velocity));
@@ -250,14 +279,20 @@ impl CustomSequencer {
                                 send_to_synth(synths, ev.synth_index, ev.channel, &ev.event_type);
                             }
                         }
-                        crate::midi::MidiEventType::NoteOff { .. } => {
+                        crate::midi::MidiEventType::NoteOff { pitch } => {
+                            let key: NoteKey = (ev.track_id, ev.channel, *pitch);
                             self.active_notes.remove(&key);
-                            let output_key = (ev.synth_index, ev.channel, key.2);
+                            let output_key = (ev.synth_index, ev.channel, *pitch);
                             if !self.is_note_active(output_key)
                                 && !live_owns_output(live_notes, output_key)
                             {
                                 send_to_synth(synths, ev.synth_index, ev.channel, &ev.event_type);
                             }
+                        }
+                        crate::midi::MidiEventType::ControlChange { controller, value } => {
+                            self.active_controllers
+                                .insert((ev.synth_index, ev.channel, *controller), *value);
+                            send_to_synth(synths, ev.synth_index, ev.channel, &ev.event_type);
                         }
                     }
                     self.current_event_idx += 1;
@@ -381,6 +416,22 @@ impl CustomSequencer {
             }
         }
         self.active_notes.clear();
+
+        for (&(synth_index, channel, controller), &value) in &self.active_controllers {
+            if controller == 64 && value > 0 {
+                send_to_synth(
+                    synths,
+                    synth_index,
+                    channel,
+                    &crate::midi::MidiEventType::ControlChange {
+                        controller: 64,
+                        value: 0,
+                    },
+                );
+            }
+        }
+        self.active_controllers
+            .retain(|&(_, _, ctrl), _| ctrl != 64);
     }
 
     // ------------------------------------------------------------------
@@ -501,5 +552,38 @@ mod tests {
         // pan = 0.5 -> pan_l = 0.5, pan_r = 1.0
         assert_eq!(m1.1, 0.5);
         assert_eq!(m1.2, 1.0);
+    }
+
+    #[test]
+    fn seek_updates_active_pedal_and_silence_releases() {
+        let mut sequencer = CustomSequencer::new();
+        let mut data = MidiData::new_empty(&["Piano".into()]);
+        data.tracks[0].synth_index = 0;
+        // Pedal down at tick 240 (0.25s), pedal up at tick 960 (1.0s)
+        data.tracks[0].set_pedal_interval(240, 960, 0);
+        sequencer.load(&data);
+
+        let live_notes = HashMap::new();
+        let mut synths: Vec<TrackSynth> = Vec::new();
+
+        // Seek to 0.1s (before pedal): pedal should NOT be active
+        sequencer.seek(0.1, &mut synths, &live_notes);
+        assert_eq!(sequencer.active_controllers.get(&(0, 0, 64)), None);
+
+        // Seek to 0.5s (inside pedal): pedal SHOULD be active with value 127
+        sequencer.seek(0.5, &mut synths, &live_notes);
+        assert_eq!(sequencer.active_controllers.get(&(0, 0, 64)), Some(&127));
+
+        // Seek past 1.0s (after pedal): pedal SHOULD be inactive (value 0)
+        sequencer.seek(1.2, &mut synths, &live_notes);
+        assert_eq!(sequencer.active_controllers.get(&(0, 0, 64)), Some(&0));
+
+        // Seek back inside pedal
+        sequencer.seek(0.5, &mut synths, &live_notes);
+        assert_eq!(sequencer.active_controllers.get(&(0, 0, 64)), Some(&127));
+
+        // Silence sequence notes: should clear active CC 64
+        sequencer.silence_sequence_notes(&mut synths, &live_notes);
+        assert_eq!(sequencer.active_controllers.get(&(0, 0, 64)), None);
     }
 }

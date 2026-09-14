@@ -51,6 +51,10 @@ pub fn is_typing_octave_down_key(keyval: gdk::Key) -> bool {
     matches!(keyval, gdk::Key::Down)
 }
 
+pub fn is_typing_pedal_key(keyval: gdk::Key) -> bool {
+    matches!(keyval, gdk::Key::Tab | gdk::Key::ISO_Left_Tab)
+}
+
 pub fn remove_released_typing_key(
     pressed_keys: &mut HashMap<gdk::Key, u8>,
     keyval: gdk::Key,
@@ -260,5 +264,13 @@ mod tests {
             1.0 / 150.0
         );
         assert_eq!(playhead_time_for_click(KEY_WIDTH, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn tab_key_acts_as_sustain_pedal() {
+        assert!(is_typing_pedal_key(gdk::Key::Tab));
+        assert!(is_typing_pedal_key(gdk::Key::ISO_Left_Tab));
+        assert!(!is_typing_pedal_key(gdk::Key::space));
+        assert!(!is_typing_pedal_key(gdk::Key::Return));
     }
 }

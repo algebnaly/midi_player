@@ -36,6 +36,12 @@ pub fn wire_midi_input(
         let pr_midi_visual = piano_roll.clone();
         glib::timeout_add_local(Duration::from_millis(8), move || {
             for event in midi_ui_rx.try_iter() {
+                if event.is_control_change {
+                    if event.controller == 64 {
+                        pr_midi_visual.set_pedal_active(event.active);
+                    }
+                    continue;
+                }
                 pr_midi_visual.set_external_note_active(event.channel, event.pitch, event.active);
                 if event.active {
                     pr_midi_visual.put_midi_note_on(

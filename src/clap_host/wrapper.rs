@@ -192,6 +192,17 @@ impl ClapPluginWrapper {
         self.active_notes[channel as usize & 0x0F][key as usize & 0x7F] = false;
     }
 
+    /// Queue a MIDI Control-Change event to be delivered on the next render call.
+    pub fn send_control_change(&mut self, channel: u8, controller: u8, value: u8) {
+        use clack_host::events::event_types::MidiEvent;
+        let midi = MidiEvent::new(
+            0,
+            0,
+            [0xB0 | (channel & 0x0F), controller & 0x7F, value & 0x7F],
+        );
+        self.pending_events.push(&midi);
+    }
+
     /// Send NoteOff only for notes that are currently active.
     ///
     /// Typically only a handful of notes are sounding at any time, so this

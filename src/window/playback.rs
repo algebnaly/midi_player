@@ -209,6 +209,13 @@ pub fn wire_playback(
         }
     });
 
+    let player_preview_cc = player.clone();
+    piano_roll.connect_preview_control_change(move |synth_index, channel, controller, value| {
+        if let Some(p) = &*player_preview_cc.borrow() {
+            p.preview_control_change(synth_index, channel, controller, value);
+        }
+    });
+
     let player_gui = player.clone();
     let track_dropdown_gui = track_dropdown.clone();
     let piano_roll_gui = piano_roll.clone();

@@ -94,3 +94,130 @@ pub fn render_notes(
         }
     }
 }
+
+/// Render the sustain pedal (CC 64) lane at the bottom of the roll.
+pub fn render_pedal_lane(
+    snapshot: &gtk::Snapshot,
+    vp: &Viewport,
+    midi: &MidiData,
+    active_track: usize,
+    drag_state: &crate::roll::types::DragState,
+    theme: &Theme,
+) {
+    let kw = crate::roll::types::KEY_WIDTH as f32;
+    let width = vp.width as f32;
+    let height = vp.height as f32;
+    let lane_h = crate::roll::types::PEDAL_LANE_HEIGHT as f32;
+    let lane_y = height - lane_h;
+    let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
+
+    // Background of pedal lane
+    snapshot.append_color(
+        &theme.pedal_lane_bg,
+        &graphene::Rect::new(kw, lane_y, width - kw, lane_h),
+    );
+    // Top border separator line
+    snapshot.append_color(
+        &theme.pedal_lane_border,
+        &graphene::Rect::new(kw, lane_y, width - kw, 1.0),
+    );
+
+    if active_track >= midi.tracks.len() {
+        return;
+    }
+
+    let track = &midi.tracks[active_track];
+    let intervals = track.pedal_intervals();
+    let bar_y = lane_y + 3.0;
+    let bar_h = lane_h - 6.0;
+
+    for interval in &intervals {
+        let x0 = vp.tick_to_x(interval.start_tick, tps) as f32;
+        let x1 = vp.tick_to_x(interval.end_tick, tps) as f32;
+        let w = (x1 - x0).max(crate::roll::types::MIN_NOTE_WIDTH_PX as f32);
+
+        if x0 + w > kw && x0 < width {
+            snapshot.append_color(
+                &theme.pedal_block,
+                &graphene::Rect::new(x0, bar_y, w, bar_h),
+            );
+            snapshot.append_color(
+                &theme.pedal_block_border,
+                &graphene::Rect::new(x0, bar_y, w, 1.0),
+            );
+            snapshot.append_color(
+                &theme.pedal_block_border,
+                &graphene::Rect::new(x0, bar_y + bar_h - 1.0, w, 1.0),
+            );
+            snapshot.append_color(
+                &theme.pedal_block_border,
+                &graphene::Rect::new(x0, bar_y, 1.0, bar_h),
+            );
+            snapshot.append_color(
+                &theme.pedal_block_border,
+                &graphene::Rect::new(x0 + w - 1.0, bar_y, 1.0, bar_h),
+            );
+        }
+    }
+
+    // If currently dragging to draw/resize/move pedal, render ghost
+    if let Some(orig) = drag_state.orig_pedal {
+        let ghost_range = match drag_state.mode {
+            crate::roll::types::DragMode::DrawPedal => {
+                let cur_tick =
+                    vp.x_to_tick(vp.scroll_x + drag_state.start_x + drag_state.last_dx, tps) as u64;
+                let cur_snapped = crate::roll::types::snap_tick(cur_tick, midi.ticks_per_beat);
+                if cur_snapped >= orig.0 {
+                    Some((orig.0, cur_snapped))
+                } else {
+                    Some((cur_snapped, orig.0))
+                }
+            }
+            crate::roll::types::DragMode::ResizePedal => {
+                let cur_tick =
+                    vp.x_to_tick(vp.scroll_x + drag_state.start_x + drag_state.last_dx, tps) as u64;
+                let min_len =
+                    (midi.ticks_per_beat as u64 / crate::roll::types::SNAP_SUBDIVISIONS).max(1);
+                let cur_snapped = crate::roll::types::snap_tick(cur_tick, midi.ticks_per_beat)
+                    .max(orig.0 + min_len);
+                Some((orig.0, cur_snapped))
+            }
+            crate::roll::types::DragMode::MovePedal => {
+                let delta_ticks = ((drag_state.last_dx / vp.zoom_x) * tps).round() as i64;
+                let dur = orig.1.saturating_sub(orig.0);
+                let new_start = (orig.0 as i64 + delta_ticks).max(0) as u64;
+                let snapped_start = crate::roll::types::snap_tick(new_start, midi.ticks_per_beat);
+                Some((snapped_start, snapped_start + dur))
+            }
+            _ => None,
+        };
+
+        if let Some((g_start, g_end)) = ghost_range {
+            let gx0 = vp.tick_to_x(g_start, tps) as f32;
+            let gx1 = vp.tick_to_x(g_end, tps) as f32;
+            let gw = (gx1 - gx0).max(crate::roll::types::MIN_NOTE_WIDTH_PX as f32);
+            if gx0 + gw > kw && gx0 < width {
+                snapshot.append_color(
+                    &theme.pedal_block_active,
+                    &graphene::Rect::new(gx0, bar_y, gw, bar_h),
+                );
+                snapshot.append_color(
+                    &theme.pedal_block_border,
+                    &graphene::Rect::new(gx0, bar_y, gw, 1.0),
+                );
+                snapshot.append_color(
+                    &theme.pedal_block_border,
+                    &graphene::Rect::new(gx0, bar_y + bar_h - 1.0, gw, 1.0),
+                );
+                snapshot.append_color(
+                    &theme.pedal_block_border,
+                    &graphene::Rect::new(gx0, bar_y, 1.0, bar_h),
+                );
+                snapshot.append_color(
+                    &theme.pedal_block_border,
+                    &graphene::Rect::new(gx0 + gw - 1.0, bar_y, 1.0, bar_h),
+                );
+            }
+        }
+    }
+}

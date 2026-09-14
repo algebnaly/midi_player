@@ -206,15 +206,16 @@ fn drain_live_midi(
     synths: &mut [TrackSynth],
 ) {
     for event in receiver.try_iter() {
-        let key = event.key();
         match event {
             LiveMidiEvent::NoteOn {
+                track_id,
+                synth_index,
                 channel,
                 pitch,
                 velocity,
-                ..
             } => {
-                let output_key = event.output_key();
+                let key = (track_id, channel, pitch);
+                let output_key = (synth_index, channel, pitch);
                 let already_sounding =
                     live_notes
                         .iter()
@@ -232,8 +233,14 @@ fn drain_live_midi(
                     );
                 }
             }
-            LiveMidiEvent::NoteOff { channel, pitch, .. } => {
-                let output_key = event.output_key();
+            LiveMidiEvent::NoteOff {
+                track_id,
+                synth_index,
+                channel,
+                pitch,
+            } => {
+                let key = (track_id, channel, pitch);
+                let output_key = (synth_index, channel, pitch);
                 let was_live = live_notes.remove(&key).is_some();
                 let another_live_owner =
                     live_notes
@@ -249,6 +256,20 @@ fn drain_live_midi(
                         &MidiEventType::NoteOff { pitch },
                     );
                 }
+            }
+            LiveMidiEvent::ControlChange {
+                synth_index,
+                channel,
+                controller,
+                value,
+                ..
+            } => {
+                send_live_event(
+                    synths,
+                    synth_index,
+                    channel,
+                    &MidiEventType::ControlChange { controller, value },
+                );
             }
         }
     }

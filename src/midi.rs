@@ -93,11 +93,21 @@ impl Default for TrackMode {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlEvent {
+    pub tick: u64,
+    pub channel: u8,
+    pub controller: u8,
+    pub value: u8,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackData {
     pub id: TrackId,
     pub name: String,
     pub notes: Vec<Note>,
+    #[serde(default)]
+    pub control_events: Vec<ControlEvent>,
     #[serde(skip, default)]
     pub synth_index: usize,
     pub synth_source: SynthSource,
@@ -114,10 +124,11 @@ pub struct MidiData {
     next_track_id: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MidiEventType {
     NoteOn { pitch: u8, velocity: u8 },
     NoteOff { pitch: u8 },
+    ControlChange { controller: u8, value: u8 },
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +148,7 @@ impl MidiData {
                 id: TrackId(1),
                 name: "Track 0".to_string(),
                 notes: Vec::new(),
+                control_events: Vec::new(),
                 synth_index: 0,
                 synth_source: SynthSource::default(),
                 mixer: TrackMixerSettings::default(),
@@ -149,6 +161,7 @@ impl MidiData {
                     id: TrackId(synth_index as u64 + 1),
                     name: name.clone(),
                     notes: Vec::new(),
+                    control_events: Vec::new(),
                     synth_index,
                     synth_source: SynthSource::default(),
                     mixer: TrackMixerSettings::default(),
@@ -178,6 +191,7 @@ impl MidiData {
             id,
             name,
             notes: Vec::new(),
+            control_events: Vec::new(),
             synth_index,
             synth_source: SynthSource::default(),
             mixer: TrackMixerSettings::default(),
@@ -202,6 +216,7 @@ impl MidiData {
                 id,
                 name: format!("{} Copy", source.name),
                 notes: source.notes.clone(),
+                control_events: source.control_events.clone(),
                 synth_index: source.synth_index,
                 synth_source: source.synth_source.clone(),
                 mixer: source.mixer,
@@ -301,6 +316,19 @@ impl MidiData {
                     event_type: MidiEventType::NoteOff { pitch: note.pitch },
                 });
             }
+            for ctrl in &track.control_events {
+                let time_sec = tick_to_seconds(ctrl.tick);
+                events.push(TimedEvent {
+                    time_seconds: time_sec,
+                    channel: ctrl.channel,
+                    track_id: track.id,
+                    synth_index: track.synth_index,
+                    event_type: MidiEventType::ControlChange {
+                        controller: ctrl.controller,
+                        value: ctrl.value,
+                    },
+                });
+            }
         }
 
         events.sort_by(|a, b| {
@@ -331,6 +359,7 @@ impl MidiData {
             let mut active_notes: std::collections::HashMap<(u8, u8), (u64, u8)> =
                 std::collections::HashMap::new();
             let mut notes = Vec::new();
+            let mut control_events = Vec::new();
             let mut name = None;
 
             for event in track {
@@ -369,6 +398,14 @@ impl MidiData {
                                     });
                                 }
                             }
+                            MidiMessage::Controller { controller, value } => {
+                                control_events.push(ControlEvent {
+                                    tick: current_tick,
+                                    channel: ch,
+                                    controller: controller.as_int(),
+                                    value: value.as_int(),
+                                });
+                            }
                             _ => {}
                         }
                     }
@@ -392,8 +429,11 @@ impl MidiData {
             }
 
             notes.sort_by_key(|n| n.start_tick);
-            if !notes.is_empty() {
-                let mode = if notes.iter().any(|n| n.channel == 9) {
+            control_events.sort_by_key(|c| c.tick);
+            if !notes.is_empty() || !control_events.is_empty() {
+                let mode = if notes.iter().any(|n| n.channel == 9)
+                    || control_events.iter().any(|c| c.channel == 9)
+                {
                     TrackMode::Drum(DrumMap::gm_default())
                 } else {
                     TrackMode::default()
@@ -402,6 +442,7 @@ impl MidiData {
                     id: TrackId(tracks.len() as u64 + 1),
                     name: name.unwrap_or_else(|| format!("Track {}", tracks.len())),
                     notes,
+                    control_events,
                     synth_index: 0,
                     synth_source: SynthSource::default(),
                     mixer: TrackMixerSettings::default(),
@@ -416,6 +457,7 @@ impl MidiData {
                 id: TrackId(1),
                 name: "Track 0".to_string(),
                 notes: vec![],
+                control_events: vec![],
                 synth_index: 0,
                 synth_source: SynthSource::default(),
                 mixer: TrackMixerSettings::default(),
@@ -480,29 +522,38 @@ impl MidiData {
                 kind: TrackEventKind::Meta(MetaMessage::TrackName(t.name.as_bytes())),
             }];
 
-            // Create absolute note on/off events
+            // Create absolute note on/off and control events
             #[derive(Debug, Clone)]
             enum Ev {
+                Cc(u8, u8, u8), // ch, controller, val
                 On(u8, u8, u8),
                 Off(u8, u8, u8),
-            } // ch, pitch, vel
+            }
 
             let mut abs_events: Vec<(u64, Ev)> = Vec::new();
             for n in &t.notes {
                 abs_events.push((n.start_tick, Ev::On(n.channel, n.pitch, n.velocity)));
                 abs_events.push((n.end_tick, Ev::Off(n.channel, n.pitch, 0)));
             }
+            for c in &t.control_events {
+                abs_events.push((c.tick, Ev::Cc(c.channel, c.controller, c.value)));
+            }
 
-            // Sort by tick, then NoteOff before NoteOn
+            // Sort by tick, with tie-breaking:
+            // CC(>=64) before NoteOff before NoteOn before CC(<64)
             abs_events.sort_by(|a, b| {
                 if a.0 != b.0 {
                     a.0.cmp(&b.0)
                 } else {
-                    match (&a.1, &b.1) {
-                        (Ev::Off(_, _, _), Ev::On(_, _, _)) => std::cmp::Ordering::Less,
-                        (Ev::On(_, _, _), Ev::Off(_, _, _)) => std::cmp::Ordering::Greater,
-                        _ => std::cmp::Ordering::Equal,
+                    fn ev_rank(ev: &Ev) -> u8 {
+                        match ev {
+                            Ev::Cc(_, _, val) if *val < 64 => 0,
+                            Ev::Off(_, _, _) => 1,
+                            Ev::Cc(_, _, _) => 2,
+                            Ev::On(_, _, _) => 3,
+                        }
                     }
+                    ev_rank(&a.1).cmp(&ev_rank(&b.1))
                 }
             });
 
@@ -522,6 +573,13 @@ impl MidiData {
                         message: MidiMessage::NoteOff {
                             key: midly::num::u7::new(p),
                             vel: midly::num::u7::new(v),
+                        },
+                    },
+                    Ev::Cc(ch, ctrl, val) => TrackEventKind::Midi {
+                        channel: midly::num::u4::new(ch),
+                        message: MidiMessage::Controller {
+                            controller: midly::num::u7::new(ctrl),
+                            value: midly::num::u7::new(val),
                         },
                     },
                 };
@@ -576,18 +634,123 @@ impl MidiData {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PedalInterval {
+    pub start_tick: u64,
+    pub end_tick: u64,
+    pub channel: u8,
+}
+
 impl TrackData {
     pub fn is_audible(&self, has_solo: bool) -> bool {
         !self.mixer.mute && (!has_solo || self.mixer.solo)
     }
+
+    /// Returns the active sustain pedal (CC 64) intervals for this track.
+    pub fn pedal_intervals(&self) -> Vec<PedalInterval> {
+        let mut ccs: Vec<&ControlEvent> = self
+            .control_events
+            .iter()
+            .filter(|e| e.controller == 64)
+            .collect();
+        ccs.sort_by(|a, b| a.tick.cmp(&b.tick).then_with(|| a.value.cmp(&b.value)));
+
+        let mut intervals = Vec::new();
+        let mut current_on: Option<(u64, u8)> = None;
+
+        for cc in ccs {
+            if cc.value >= 64 {
+                if current_on.is_none() {
+                    current_on = Some((cc.tick, cc.channel));
+                }
+            } else if let Some((start_tick, channel)) = current_on {
+                intervals.push(PedalInterval {
+                    start_tick,
+                    end_tick: cc.tick.max(start_tick + 1),
+                    channel,
+                });
+                current_on = None;
+            }
+        }
+
+        if let Some((start_tick, channel)) = current_on {
+            let last_tick = self
+                .notes
+                .iter()
+                .map(|n| n.end_tick)
+                .max()
+                .unwrap_or(start_tick);
+            intervals.push(PedalInterval {
+                start_tick,
+                end_tick: last_tick.max(start_tick + 480 * 4),
+                channel,
+            });
+        }
+
+        intervals
+    }
+
+    /// Add or replace a sustain pedal interval [start_tick, end_tick].
+    pub fn set_pedal_interval(&mut self, start_tick: u64, end_tick: u64, channel: u8) {
+        if end_tick <= start_tick {
+            return;
+        }
+        self.control_events
+            .retain(|e| !(e.controller == 64 && e.tick >= start_tick && e.tick <= end_tick));
+        self.control_events.push(ControlEvent {
+            tick: start_tick,
+            channel,
+            controller: 64,
+            value: 127,
+        });
+        self.control_events.push(ControlEvent {
+            tick: end_tick,
+            channel,
+            controller: 64,
+            value: 0,
+        });
+        self.control_events
+            .sort_by(|a, b| a.tick.cmp(&b.tick).then_with(|| a.value.cmp(&b.value)));
+    }
+
+    /// Delete a sustain pedal interval that covers `tick`.
+    pub fn delete_pedal_interval_at(&mut self, tick: u64) -> bool {
+        let intervals = self.pedal_intervals();
+        if let Some(target) = intervals
+            .into_iter()
+            .find(|i| tick >= i.start_tick && tick <= i.end_tick)
+        {
+            self.control_events.retain(|e| {
+                !(e.controller == 64 && e.tick >= target.start_tick && e.tick <= target.end_tick)
+            });
+            return true;
+        }
+        false
+    }
+
+    /// Move a sustain pedal interval from `[orig_start, orig_end]` to `[new_start, new_end]`.
+    pub fn move_pedal_interval(
+        &mut self,
+        orig_start: u64,
+        orig_end: u64,
+        new_start: u64,
+        new_end: u64,
+        channel: u8,
+    ) {
+        self.control_events
+            .retain(|e| !(e.controller == 64 && e.tick >= orig_start && e.tick <= orig_end));
+        self.set_pedal_interval(new_start, new_end, channel);
+    }
 }
 
-/// Tie-breaker for [`MidiData::compile_events`]: at the same timestamp, NoteOff
-/// must be dispatched before NoteOn (same rule as [`MidiData::to_smf`]).
+/// Tie-breaker for [`MidiData::compile_events`]: at the same timestamp, CC (off)
+/// before NoteOff before CC (on) before NoteOn.
 fn same_time_event_order(event: &MidiEventType) -> u8 {
     match event {
-        MidiEventType::NoteOff { .. } => 0,
-        MidiEventType::NoteOn { .. } => 1,
+        MidiEventType::ControlChange { value, .. } if *value < 64 => 0,
+        MidiEventType::NoteOff { .. } => 1,
+        MidiEventType::ControlChange { .. } => 2,
+        MidiEventType::NoteOn { .. } => 3,
     }
 }
 
@@ -611,6 +774,7 @@ mod tests {
                 id: TrackId(1),
                 name: "t0".into(),
                 notes,
+                control_events: Vec::new(),
                 synth_index: 0,
                 synth_source: SynthSource::default(),
                 mixer: TrackMixerSettings::default(),
@@ -630,6 +794,7 @@ mod tests {
             .map(|e| match &e.event_type {
                 MidiEventType::NoteOn { .. } => "on",
                 MidiEventType::NoteOff { .. } => "off",
+                MidiEventType::ControlChange { .. } => "cc",
             })
             .collect()
     }
@@ -703,7 +868,7 @@ mod tests {
             .into_iter()
             .filter_map(|event| match event.event_type {
                 MidiEventType::NoteOn { pitch, .. } => Some(pitch),
-                MidiEventType::NoteOff { .. } => None,
+                _ => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(pitches, vec![61, 62]);
@@ -714,7 +879,7 @@ mod tests {
             .into_iter()
             .filter_map(|event| match event.event_type {
                 MidiEventType::NoteOn { pitch, .. } => Some(pitch),
-                MidiEventType::NoteOff { .. } => None,
+                _ => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(pitches, vec![62]);
@@ -740,5 +905,132 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["Piano", "Strings"]);
+    }
+
+    #[test]
+    fn pedal_interval_crud_and_query() {
+        let mut track = TrackData {
+            id: TrackId(1),
+            name: "Piano".into(),
+            notes: vec![note(60, 0, 480)],
+            control_events: Vec::new(),
+            synth_index: 0,
+            synth_source: SynthSource::default(),
+            mixer: TrackMixerSettings::default(),
+            input: TrackInputSettings::default(),
+            mode: TrackMode::default(),
+        };
+
+        // Initially no intervals
+        assert!(track.pedal_intervals().is_empty());
+
+        // Add interval [480, 960]
+        track.set_pedal_interval(480, 960, 0);
+        let intervals = track.pedal_intervals();
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(intervals[0].start_tick, 480);
+        assert_eq!(intervals[0].end_tick, 960);
+        assert_eq!(track.control_events.len(), 2);
+        assert_eq!(track.control_events[0].controller, 64);
+        assert_eq!(track.control_events[0].value, 127);
+        assert_eq!(track.control_events[1].controller, 64);
+        assert_eq!(track.control_events[1].value, 0);
+
+        // Move interval from [480, 960] to [960, 1440]
+        track.move_pedal_interval(480, 960, 960, 1440, 0);
+        let intervals = track.pedal_intervals();
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(intervals[0].start_tick, 960);
+        assert_eq!(intervals[0].end_tick, 1440);
+
+        // Delete interval
+        assert!(track.delete_pedal_interval_at(1000));
+        assert!(track.pedal_intervals().is_empty());
+        assert!(track.control_events.is_empty());
+    }
+
+    #[test]
+    fn pedal_smf_round_trip() {
+        let mut midi = MidiData::new_empty(&["Piano".into()]);
+        midi.tracks[0].notes.push(note(60, 0, 480));
+        midi.tracks[0].notes.push(note(64, 480, 960));
+        midi.tracks[0].set_pedal_interval(240, 960, 0);
+
+        // Write to temp file and load back
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("test_pedal_roundtrip.mid");
+        let path_str = path.to_str().unwrap();
+        midi.export_to_file(path_str).unwrap();
+
+        let loaded = MidiData::load(path_str).unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(loaded.tracks.len(), 1);
+        assert_eq!(loaded.tracks[0].notes.len(), 2);
+        let intervals = loaded.tracks[0].pedal_intervals();
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(intervals[0].start_tick, 240);
+        assert_eq!(intervals[0].end_tick, 960);
+    }
+
+    #[test]
+    fn compile_events_interleaves_pedal_and_notes_with_correct_order() {
+        let mut midi = MidiData::new_empty(&["Piano".into()]);
+        // Note 1: 0..480. Note 2: 480..960.
+        midi.tracks[0].notes.push(note(60, 0, 480));
+        midi.tracks[0].notes.push(note(64, 480, 960));
+        // Pedal 1: 0..480. Pedal 2: 480..960.
+        // At tick 480:
+        // Expected order: CC off (pedal 1) -> NoteOff (note 1) -> CC on (pedal 2) -> NoteOn (note 2)
+        midi.tracks[0].control_events.push(ControlEvent {
+            tick: 0,
+            channel: 0,
+            controller: 64,
+            value: 127,
+        });
+        midi.tracks[0].control_events.push(ControlEvent {
+            tick: 480,
+            channel: 0,
+            controller: 64,
+            value: 0,
+        });
+        midi.tracks[0].control_events.push(ControlEvent {
+            tick: 480,
+            channel: 0,
+            controller: 64,
+            value: 127,
+        });
+        midi.tracks[0].control_events.push(ControlEvent {
+            tick: 960,
+            channel: 0,
+            controller: 64,
+            value: 0,
+        });
+
+        let events = midi.compile_events();
+        // Filter events at tick 480 (time = 0.5s at 120bpm, 480 tpb)
+        let at_480: Vec<&MidiEventType> = events
+            .iter()
+            .filter(|e| (e.time_seconds - 0.5).abs() < 1e-6)
+            .map(|e| &e.event_type)
+            .collect();
+
+        assert_eq!(at_480.len(), 4);
+        assert!(matches!(
+            at_480[0],
+            MidiEventType::ControlChange {
+                controller: 64,
+                value: 0
+            }
+        ));
+        assert!(matches!(at_480[1], MidiEventType::NoteOff { pitch: 60 }));
+        assert!(matches!(
+            at_480[2],
+            MidiEventType::ControlChange {
+                controller: 64,
+                value: 127
+            }
+        ));
+        assert!(matches!(at_480[3], MidiEventType::NoteOn { pitch: 64, .. }));
     }
 }

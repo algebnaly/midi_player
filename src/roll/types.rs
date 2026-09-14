@@ -20,6 +20,8 @@ pub const PLAYHEAD_HIT_RADIUS: f64 = 10.0;
 pub const NOTE_EDGE_THRESHOLD: f64 = 8.0;
 /// Height (px) of the top region where a click always drags the playhead.
 pub const TOP_REGION_HEIGHT: f64 = 20.0;
+/// Height (px) of the bottom pedal lane in melodic roll.
+pub const PEDAL_LANE_HEIGHT: f64 = 26.0;
 /// Minimum rendered width of a note so it stays visible at high zoom-out.
 pub const MIN_NOTE_WIDTH_PX: f64 = 2.0;
 
@@ -130,6 +132,12 @@ pub enum DragMode {
     BoxSelect,
     /// Bulk-dragging all selected notes.
     BulkMove,
+    /// Drawing a new sustain pedal block.
+    DrawPedal,
+    /// Moving an existing sustain pedal block.
+    MovePedal,
+    /// Resizing an existing sustain pedal block.
+    ResizePedal,
 }
 
 // ── Selection rectangle ───────────────────────────────────────────────
@@ -170,6 +178,8 @@ pub struct DragState {
     pub orig_notes: HashMap<usize, Note>,
     /// Pre-existing selection at box-select begin (for Shift+select append).
     pub base_selection: std::collections::HashSet<usize>,
+    /// (start_tick, end_tick) of pedal interval at drag begin.
+    pub orig_pedal: Option<(u64, u64)>,
 }
 
 // ── Hit-test result ────────────────────────────────────────────────────
@@ -209,6 +219,12 @@ pub struct Theme {
     pub key_text: gdk::RGBA,
     pub selection_rect_fill: gdk::RGBA,
     pub selection_rect_border: gdk::RGBA,
+    pub pedal_lane_bg: gdk::RGBA,
+    pub pedal_lane_border: gdk::RGBA,
+    pub pedal_block: gdk::RGBA,
+    pub pedal_block_active: gdk::RGBA,
+    pub pedal_block_border: gdk::RGBA,
+    pub pedal_text: gdk::RGBA,
 }
 
 /// Create the default dark theme matching the original hard-coded colors.
@@ -238,6 +254,12 @@ pub fn default_theme() -> Theme {
         key_text: gdk::RGBA::new(0.2, 0.2, 0.2, 1.0),
         selection_rect_fill: gdk::RGBA::new(0.3, 0.5, 1.0, 0.15),
         selection_rect_border: gdk::RGBA::new(0.4, 0.6, 1.0, 0.6),
+        pedal_lane_bg: gdk::RGBA::new(0.08, 0.09, 0.11, 1.0),
+        pedal_lane_border: gdk::RGBA::new(0.22, 0.25, 0.28, 1.0),
+        pedal_block: gdk::RGBA::new(0.18, 0.58, 0.52, 0.85),
+        pedal_block_active: gdk::RGBA::new(0.24, 0.78, 0.70, 0.95),
+        pedal_block_border: gdk::RGBA::new(0.35, 0.90, 0.82, 1.0),
+        pedal_text: gdk::RGBA::new(0.92, 0.96, 0.96, 0.95),
     }
 }
 

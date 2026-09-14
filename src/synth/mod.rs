@@ -37,7 +37,7 @@ impl TrackSynth {
         }
     }
 
-    /// Send a MIDI event (NoteOn / NoteOff) to this synth, dispatching to the
+    /// Send a MIDI event (NoteOn / NoteOff / ControlChange) to this synth, dispatching to the
     /// correct backend automatically.
     pub fn send_midi_event(&mut self, channel: u8, event: &MidiEventType) {
         match self {
@@ -55,6 +55,13 @@ impl TrackSynth {
                         key: *pitch,
                     });
                 }
+                MidiEventType::ControlChange { controller, value } => {
+                    let _ = s.send_event(MidiEvent::ControlChange {
+                        channel,
+                        ctrl: *controller,
+                        value: *value,
+                    });
+                }
             },
             TrackSynth::ClapPlugin(c) => match event {
                 MidiEventType::NoteOn { pitch, velocity } => {
@@ -62,6 +69,9 @@ impl TrackSynth {
                 }
                 MidiEventType::NoteOff { pitch } => {
                     c.send_note_off(channel, *pitch);
+                }
+                MidiEventType::ControlChange { controller, value } => {
+                    c.send_control_change(channel, *controller, *value);
                 }
             },
             TrackSynth::Sfz(s) => match event {
@@ -72,26 +82,38 @@ impl TrackSynth {
                     // sfizz note off velocity is typically 0
                     s.send_note_off(0, *pitch, 0);
                 }
+                MidiEventType::ControlChange { controller, value } => {
+                    s.send_cc(0, *controller as i32, *value as i32);
+                }
             },
         }
     }
 
-    /// Silence all currently-sounding notes on every channel.
+    /// Silence all currently-sounding notes on every channel and release sustain pedal.
     ///
-    /// For SoundFont this sends `AllNotesOff` on channels 0–15.
+    /// For SoundFont this sends `AllNotesOff` and CC 64 = 0 on channels 0–15.
     /// For CLAP plugins this sends individual NoteOff only for notes that are
     /// currently tracked as active, avoiding the overhead of 2048 events.
     pub fn all_notes_off(&mut self) {
         match self {
             TrackSynth::SoundFont(s) => {
                 for ch in 0..16 {
+                    let _ = s.send_event(MidiEvent::ControlChange {
+                        channel: ch,
+                        ctrl: 64,
+                        value: 0,
+                    });
                     let _ = s.send_event(MidiEvent::AllNotesOff { channel: ch });
                 }
             }
             TrackSynth::ClapPlugin(c) => {
+                for ch in 0..16 {
+                    c.send_control_change(ch, 64, 0);
+                }
                 c.send_all_notes_off();
             }
             TrackSynth::Sfz(s) => {
+                s.send_cc(0, 64, 0);
                 for note in 0..128 {
                     s.send_note_off(0, note as u8, 0);
                 }

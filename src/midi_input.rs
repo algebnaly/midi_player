@@ -19,7 +19,7 @@ use std::time::Instant;
 pub type LiveNoteKey = (TrackId, u8, u8); // track, channel, pitch
 pub type OutputNoteKey = (usize, u8, u8); // synth, channel, pitch
 
-/// Note event consumed by the real-time audio callback.
+/// Note/controller event consumed by the real-time audio callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveMidiEvent {
     NoteOn {
@@ -35,10 +35,18 @@ pub enum LiveMidiEvent {
         channel: u8,
         pitch: u8,
     },
+    ControlChange {
+        track_id: TrackId,
+        synth_index: usize,
+        channel: u8,
+        controller: u8,
+        value: u8,
+    },
 }
 
 impl LiveMidiEvent {
-    pub fn key(self) -> LiveNoteKey {
+    #[allow(dead_code)]
+    pub fn key(self) -> Option<LiveNoteKey> {
         match self {
             Self::NoteOn {
                 track_id,
@@ -51,11 +59,13 @@ impl LiveMidiEvent {
                 channel,
                 pitch,
                 ..
-            } => (track_id, channel, pitch),
+            } => Some((track_id, channel, pitch)),
+            Self::ControlChange { .. } => None,
         }
     }
 
-    pub fn output_key(self) -> OutputNoteKey {
+    #[allow(dead_code)]
+    pub fn output_key(self) -> Option<OutputNoteKey> {
         match self {
             Self::NoteOn {
                 synth_index,
@@ -68,7 +78,8 @@ impl LiveMidiEvent {
                 channel,
                 pitch,
                 ..
-            } => (synth_index, channel, pitch),
+            } => Some((synth_index, channel, pitch)),
+            Self::ControlChange { .. } => None,
         }
     }
 }
@@ -80,6 +91,8 @@ pub struct MidiUiEvent {
     pub pitch: u8,
     pub velocity: u8,
     pub active: bool,
+    pub is_control_change: bool,
+    pub controller: u8,
     pub occurred_at: Instant,
 }
 
@@ -278,15 +291,27 @@ fn handle_message(
                 ui_tx,
             );
         }
+        LiveMidiEvent::ControlChange { .. } => {
+            send_event(message, audio_tx, ui_tx);
+        }
     }
 }
 
 fn send_event(event: LiveMidiEvent, audio_tx: &Sender<LiveMidiEvent>, ui_tx: &Sender<MidiUiEvent>) {
-    let active = matches!(event, LiveMidiEvent::NoteOn { .. });
-    let (_, channel, pitch) = event.key();
-    let velocity = match event {
-        LiveMidiEvent::NoteOn { velocity, .. } => velocity,
-        LiveMidiEvent::NoteOff { .. } => 0,
+    let (channel, pitch, velocity, active, is_control_change, controller) = match event {
+        LiveMidiEvent::NoteOn {
+            channel,
+            pitch,
+            velocity,
+            ..
+        } => (channel, pitch, velocity, true, false, 0),
+        LiveMidiEvent::NoteOff { channel, pitch, .. } => (channel, pitch, 0, false, false, 0),
+        LiveMidiEvent::ControlChange {
+            channel,
+            controller,
+            value,
+            ..
+        } => (channel, 0, value, value >= 64, true, controller),
     };
     let _ = audio_tx.send(event);
     let _ = ui_tx.send(MidiUiEvent {
@@ -294,6 +319,8 @@ fn send_event(event: LiveMidiEvent, audio_tx: &Sender<LiveMidiEvent>, ui_tx: &Se
         pitch,
         velocity,
         active,
+        is_control_change,
+        controller,
         occurred_at: Instant::now(),
     });
 }
@@ -322,6 +349,13 @@ fn parse_note_message(
             synth_index,
             channel,
             pitch,
+        }),
+        0xb0 => Some(LiveMidiEvent::ControlChange {
+            track_id,
+            synth_index,
+            channel,
+            controller: pitch,
+            value: velocity,
         }),
         _ => None,
     }
@@ -359,8 +393,22 @@ mod tests {
     }
 
     #[test]
-    fn ignores_non_note_and_truncated_messages() {
-        assert_eq!(parse_note_message(&[0xb0, 64, 127], TrackId(7), 0), None);
+    fn parses_control_change_message() {
+        assert_eq!(
+            parse_note_message(&[0xb0, 64, 127], TrackId(7), 0),
+            Some(LiveMidiEvent::ControlChange {
+                track_id: TrackId(7),
+                synth_index: 0,
+                channel: 0,
+                controller: 64,
+                value: 127,
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_unsupported_and_truncated_messages() {
+        assert_eq!(parse_note_message(&[0xc0, 1], TrackId(7), 0), None);
         assert_eq!(parse_note_message(&[0x90, 60], TrackId(7), 0), None);
     }
 

@@ -17,7 +17,6 @@ impl VelocityPoint {
 }
 
 pub fn default_velocity_points() -> Vec<VelocityPoint> {
-    // linear_velocity_points()
     soft_velocity_points()
 }
 

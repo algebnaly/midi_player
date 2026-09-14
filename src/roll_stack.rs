@@ -34,6 +34,7 @@ pub struct RollStack {
     cb_data_changed: Rc<RefCell<Vec<Rc<dyn Fn()>>>>,
     cb_note_on: Rc<RefCell<Vec<Rc<dyn Fn(usize, u8, u8, u8)>>>>,
     cb_note_off: Rc<RefCell<Vec<Rc<dyn Fn(usize, u8, u8)>>>>,
+    cb_control_change: Rc<RefCell<Vec<Rc<dyn Fn(usize, u8, u8, u8)>>>>,
 }
 
 impl RollStack {
@@ -47,6 +48,7 @@ impl RollStack {
             cb_data_changed: Rc::new(RefCell::new(Vec::new())),
             cb_note_on: Rc::new(RefCell::new(Vec::new())),
             cb_note_off: Rc::new(RefCell::new(Vec::new())),
+            cb_control_change: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -112,6 +114,10 @@ impl RollStack {
                 let cb_clone = cb.clone();
                 w.connect_preview_note_off(move |s, p, c| cb_clone(s, p, c));
             }
+            for cb in self.cb_control_change.borrow().iter() {
+                let cb_clone = cb.clone();
+                w.connect_preview_control_change(move |s, c, ctrl, val| cb_clone(s, c, ctrl, val));
+            }
             RollWidget::Drum(w)
         } else {
             let w = PianoRollWidget::new();
@@ -132,6 +138,10 @@ impl RollStack {
             for cb in self.cb_note_off.borrow().iter() {
                 let cb_clone = cb.clone();
                 w.connect_preview_note_off(move |s, p, c| cb_clone(s, p, c));
+            }
+            for cb in self.cb_control_change.borrow().iter() {
+                let cb_clone = cb.clone();
+                w.connect_preview_control_change(move |s, c, ctrl, val| cb_clone(s, c, ctrl, val));
             }
             RollWidget::Melodic(w)
         }
@@ -280,6 +290,31 @@ impl RollStack {
             match w {
                 RollWidget::Melodic(mw) => mw.connect_preview_note_off(move |s, p, c| cb(s, p, c)),
                 RollWidget::Drum(dw) => dw.connect_preview_note_off(move |s, p, c| cb(s, p, c)),
+            }
+        }
+    }
+
+    pub fn connect_preview_control_change<F: Fn(usize, u8, u8, u8) + 'static>(&self, f: F) {
+        let rc = Rc::new(f);
+        self.cb_control_change.borrow_mut().push(rc.clone());
+        for w in self.widgets.borrow().iter() {
+            let cb = rc.clone();
+            match w {
+                RollWidget::Melodic(mw) => {
+                    mw.connect_preview_control_change(move |s, c, ctrl, val| cb(s, c, ctrl, val))
+                }
+                RollWidget::Drum(dw) => {
+                    dw.connect_preview_control_change(move |s, c, ctrl, val| cb(s, c, ctrl, val))
+                }
+            }
+        }
+    }
+
+    pub fn set_pedal_active(&self, active: bool) {
+        for w in self.widgets.borrow().iter() {
+            match w {
+                RollWidget::Melodic(mw) => mw.set_pedal_active(active),
+                RollWidget::Drum(dw) => dw.set_pedal_active(active),
             }
         }
     }

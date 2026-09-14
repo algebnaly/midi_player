@@ -123,3 +123,41 @@ fn white_key_index(pitch: u8) -> usize {
         _ => unreachable!(),
     }
 }
+
+pub fn render_pedal_sidebar(
+    snapshot: &gtk::Snapshot,
+    vp: &Viewport,
+    pango_ctx: &gtk::pango::Context,
+    pedal_active: bool,
+    theme: &Theme,
+) {
+    let kw = KEY_WIDTH as f32;
+    let height = vp.height as f32;
+    let lane_h = crate::roll::types::PEDAL_LANE_HEIGHT as f32;
+    let y = height - lane_h;
+
+    let bg_color = if pedal_active {
+        &theme.pedal_block_active
+    } else {
+        &theme.pedal_lane_bg
+    };
+
+    snapshot.append_color(bg_color, &graphene::Rect::new(0.0, y, kw, lane_h));
+    snapshot.append_color(
+        &theme.pedal_lane_border,
+        &graphene::Rect::new(0.0, y, kw, 1.0),
+    );
+    snapshot.append_color(
+        &theme.pedal_lane_border,
+        &graphene::Rect::new(kw - 1.0, y, 1.0, lane_h),
+    );
+
+    let layout = gtk::pango::Layout::new(pango_ctx);
+    let font_desc = gtk::pango::FontDescription::from_string("Sans Bold 9");
+    layout.set_font_description(Some(&font_desc));
+    layout.set_text(if pedal_active { "PEDAL" } else { "Pedal" });
+    snapshot.save();
+    snapshot.translate(&graphene::Point::new(12.0, y + 5.0));
+    snapshot.append_layout(&layout, &theme.pedal_text);
+    snapshot.restore();
+}

@@ -63,6 +63,15 @@ pub trait RollView: Clone + 'static {
         self.state().connect_preview_note_off(f);
     }
 
+    fn connect_preview_control_change<F: Fn(usize, u8, u8, u8) + 'static>(&self, f: F) {
+        self.state().connect_preview_control_change(f);
+    }
+
+    fn set_pedal_active(&self, active: bool) {
+        self.state().set_pedal_active(active);
+        self.redraw();
+    }
+
     fn connect_status<F: Fn(&str) + 'static>(&self, f: F) {
         self.state().connect_status(f);
     }

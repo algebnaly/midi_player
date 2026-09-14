@@ -51,11 +51,19 @@ pub trait RollLayout {
         midi: Option<&MidiData>,
         track: usize,
     ) -> (f64, f64);
+
+    fn has_pedal_lane() -> bool {
+        false
+    }
 }
 
 pub struct MelodicLayout;
 
 impl RollLayout for MelodicLayout {
+    fn has_pedal_lane() -> bool {
+        true
+    }
+
     fn note_channel() -> u8 {
         0
     }

@@ -2,8 +2,8 @@
 
 use super::keys::{
     ModeKeyAction, ScrollAction, is_typing_octave_down_key, is_typing_octave_up_key,
-    mode_key_action_from_state, playhead_time_for_click, remove_released_typing_key, scroll_action,
-    typing_key_to_pitch_with_octave,
+    is_typing_pedal_key, mode_key_action_from_state, playhead_time_for_click,
+    remove_released_typing_key, scroll_action, typing_key_to_pitch_with_octave,
 };
 use super::layout::RollLayout;
 use super::types::*;
@@ -58,6 +58,38 @@ pub fn hit_test_note<L: RollLayout>(
                 drag_mode,
                 synth_index,
             });
+        }
+    }
+    None
+}
+
+pub fn hit_test_pedal(
+    midi: &crate::midi::MidiData,
+    track: usize,
+    zx: f64,
+    abs_x: f64,
+) -> Option<(crate::midi::PedalInterval, DragMode)> {
+    if track >= midi.tracks.len() {
+        return None;
+    }
+    let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
+    let intervals = midi.tracks[track].pedal_intervals();
+    for interval in intervals {
+        let x0 = (interval.start_tick as f64 / tps) * zx;
+        let x1 = (interval.end_tick as f64 / tps) * zx;
+        let w = (x1 - x0).max(MIN_NOTE_WIDTH_PX);
+        if abs_x >= x0 && abs_x <= x0 + w {
+            let edge = if w < NOTE_EDGE_THRESHOLD * 2.0 {
+                w / 2.0
+            } else {
+                NOTE_EDGE_THRESHOLD
+            };
+            let mode = if abs_x >= x0 + w - edge {
+                DragMode::ResizePedal
+            } else {
+                DragMode::MovePedal
+            };
+            return Some((interval, mode));
         }
     }
     None
@@ -127,6 +159,13 @@ fn handle_right_click<W: RollView>(widget: &W, x: f64, y: f64) {
     let scroll_x = *s.scroll_x.borrow();
     let act_track = *s.active_track.borrow();
     let abs_x = x - KEY_WIDTH + scroll_x;
+
+    let vp = widget.build_viewport();
+    if W::Layout::has_pedal_lane() && y >= vp.height - PEDAL_LANE_HEIGHT {
+        handle_right_click_pedal(widget, abs_x, act_track);
+        return;
+    }
+
     let target_pitch = get_target_pitch(widget, y, act_track);
 
     let mut changed = false;
@@ -164,6 +203,55 @@ fn handle_right_click<W: RollView>(widget: &W, x: f64, y: f64) {
     }
 }
 
+fn handle_right_click_pedal<W: RollView>(widget: &W, abs_x: f64, act_track: usize) {
+    let s = widget.state();
+    let zx = *s.zoom_x.borrow();
+    let mut changed = false;
+    if let Some(midi) = &mut *s.data.borrow_mut() {
+        let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
+        let tick = ((abs_x / zx) * tps) as u64;
+        if act_track < midi.tracks.len() {
+            changed = midi.tracks[act_track].delete_pedal_interval_at(tick);
+        }
+    }
+    if changed {
+        s.notify_data_changed();
+        widget.update_status();
+        widget.redraw();
+    }
+}
+
+fn handle_drag_begin_pedal<W: RollView>(widget: &W, abs_x: f64, act_track: usize) {
+    let s = widget.state();
+    let zx = *s.zoom_x.borrow();
+    let mut ds = s.drag_state.borrow_mut();
+
+    if let Some(midi) = &*s.data.borrow() {
+        let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
+        ds.start_cursor_tick = (abs_x / zx) * tps;
+
+        if let Some((interval, mode)) = hit_test_pedal(midi, act_track, zx, abs_x) {
+            ds.mode = mode;
+            ds.orig_pedal = Some((interval.start_tick, interval.end_tick));
+            drop(ds);
+            widget.set_roll_cursor(if mode == DragMode::ResizePedal {
+                Some("col-resize")
+            } else {
+                Some("grabbing")
+            });
+            widget.redraw();
+            return;
+        }
+
+        let snapped_start = snap_tick(ds.start_cursor_tick as u64, midi.ticks_per_beat);
+        ds.mode = DragMode::DrawPedal;
+        ds.orig_pedal = Some((snapped_start, snapped_start));
+        drop(ds);
+        widget.set_roll_cursor(Some("crosshair"));
+        widget.redraw();
+    }
+}
+
 fn handle_drag_begin<W: RollView>(
     widget: &W,
     start_x: f64,
@@ -181,6 +269,7 @@ fn handle_drag_begin<W: RollView>(
         let mut ds = s.drag_state.borrow_mut();
         ds.is_dragging_playhead = false;
         ds.orig_note = None;
+        ds.orig_pedal = None;
         ds.orig_notes.clear();
         ds.mode = DragMode::None;
         ds.start_x = start_x - KEY_WIDTH;
@@ -217,12 +306,17 @@ fn handle_drag_begin<W: RollView>(
     }
 
     let act_track = *s.active_track.borrow();
+    let vp = widget.build_viewport();
+    if W::Layout::has_pedal_lane() && start_y >= vp.height - PEDAL_LANE_HEIGHT {
+        handle_drag_begin_pedal(widget, abs_x, act_track);
+        return;
+    }
+
     let target_pitch = match get_target_pitch(widget, start_y, act_track) {
         Some(p) => p,
         None => return,
     };
 
-    let vp = widget.build_viewport();
     let start_lane = {
         let midi = s.data.borrow();
         W::Layout::y_to_lane(&vp, start_y, midi.as_ref(), act_track)
@@ -456,6 +550,14 @@ pub fn update_drag_position<W: RollView>(widget: &W, dx: f64, _dy: f64) {
         return;
     }
 
+    if drag_mode == DragMode::DrawPedal
+        || drag_mode == DragMode::ResizePedal
+        || drag_mode == DragMode::MovePedal
+    {
+        widget.redraw();
+        return;
+    }
+
     if drag_mode == DragMode::BulkMove {
         if let Some(midi) = &mut *s.data.borrow_mut() {
             let act = *s.active_track.borrow();
@@ -599,6 +701,77 @@ fn handle_drag_end<W: RollView>(widget: &W, dx: f64, _dy: f64) {
         if let Some(cb) = &*s.seek_callback.borrow() {
             cb(t);
         }
+    } else if drag_mode == DragMode::DrawPedal {
+        if let Some(orig) = s.drag_state.borrow().orig_pedal {
+            let zx = *s.zoom_x.borrow();
+            let sx = s.drag_state.borrow().start_x;
+            let ox = *s.scroll_x.borrow();
+            let current_x = (sx + dx + ox).max(0.0);
+            let act = *s.active_track.borrow();
+            let channel = W::Layout::note_channel();
+            if let Some(midi) = &mut *s.data.borrow_mut() {
+                let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
+                let cur_tick = ((current_x / zx) * tps) as u64;
+                let snapped = snap_tick(cur_tick, midi.ticks_per_beat);
+                let (start, end) = if snapped > orig.0 {
+                    (orig.0, snapped)
+                } else if snapped < orig.0 {
+                    (snapped, orig.0)
+                } else {
+                    (orig.0, orig.0 + midi.ticks_per_beat as u64 * 4)
+                };
+                if act < midi.tracks.len() {
+                    midi.tracks[act].set_pedal_interval(start, end, channel);
+                }
+            }
+            s.notify_data_changed();
+            widget.redraw();
+        }
+    } else if drag_mode == DragMode::ResizePedal {
+        if let Some(orig) = s.drag_state.borrow().orig_pedal {
+            let zx = *s.zoom_x.borrow();
+            let sx = s.drag_state.borrow().start_x;
+            let ox = *s.scroll_x.borrow();
+            let current_x = (sx + dx + ox).max(0.0);
+            let act = *s.active_track.borrow();
+            let channel = W::Layout::note_channel();
+            if let Some(midi) = &mut *s.data.borrow_mut() {
+                let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
+                let cur_tick = ((current_x / zx) * tps) as u64;
+                let min_len = (midi.ticks_per_beat as u64 / SNAP_SUBDIVISIONS).max(1);
+                let snapped = snap_tick(cur_tick, midi.ticks_per_beat).max(orig.0 + min_len);
+                if act < midi.tracks.len() {
+                    midi.tracks[act].set_pedal_interval(orig.0, snapped, channel);
+                }
+            }
+            s.notify_data_changed();
+            widget.redraw();
+        }
+    } else if drag_mode == DragMode::MovePedal {
+        if let Some(orig) = s.drag_state.borrow().orig_pedal {
+            let zx = *s.zoom_x.borrow();
+            let act = *s.active_track.borrow();
+            let channel = W::Layout::note_channel();
+            if let Some(midi) = &mut *s.data.borrow_mut() {
+                let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
+                let delta_ticks = ((dx / zx) * tps).round() as i64;
+                let duration = orig.1.saturating_sub(orig.0);
+                let new_start = (orig.0 as i64 + delta_ticks).max(0) as u64;
+                let snapped_start = snap_tick(new_start, midi.ticks_per_beat);
+                let new_end = snapped_start + duration;
+                if act < midi.tracks.len() {
+                    midi.tracks[act].move_pedal_interval(
+                        orig.0,
+                        orig.1,
+                        snapped_start,
+                        new_end,
+                        channel,
+                    );
+                }
+            }
+            s.notify_data_changed();
+            widget.redraw();
+        }
     } else if drag_mode == DragMode::BoxSelect {
         *s.selection_rect.borrow_mut() = None;
         widget.update_status();
@@ -621,6 +794,7 @@ fn handle_drag_end<W: RollView>(widget: &W, dx: f64, _dy: f64) {
     {
         let mut ds = s.drag_state.borrow_mut();
         ds.orig_note = None;
+        ds.orig_pedal = None;
         ds.orig_notes.clear();
         ds.base_selection.clear();
         ds.mode = DragMode::None;
@@ -727,6 +901,19 @@ fn handle_key_press<W: RollView>(widget: &W, keyval: gdk::Key) -> glib::Propagat
     }
 
     if *s.typing_keyboard_enabled.borrow() {
+        if is_typing_pedal_key(keyval) {
+            if !*s.pedal_active.borrow() {
+                *s.pedal_active.borrow_mut() = true;
+                let synth_index = widget.active_synth_index();
+                if let Some(cb) = &*s.preview_control_change_callback.borrow() {
+                    cb(synth_index, channel, 64, 127);
+                }
+                widget.update_status();
+                widget.redraw();
+            }
+            return glib::Propagation::Stop;
+        }
+
         if is_typing_octave_up_key(keyval) {
             let mut offset = s.typing_octave_offset.borrow_mut();
             *offset = (*offset + 1).min(5);
@@ -831,6 +1018,18 @@ fn handle_key_released<W: RollView>(widget: &W, keyval: gdk::Key) {
     if !*s.typing_keyboard_enabled.borrow() {
         return;
     }
+    if is_typing_pedal_key(keyval) {
+        if *s.pedal_active.borrow() {
+            *s.pedal_active.borrow_mut() = false;
+            let synth_index = widget.active_synth_index();
+            if let Some(cb) = &*s.preview_control_change_callback.borrow() {
+                cb(synth_index, W::Layout::note_channel(), 64, 0);
+            }
+            widget.update_status();
+            widget.redraw();
+        }
+        return;
+    }
     let released = {
         let mut pressed_keys = s.typing_pressed_keys.borrow_mut();
         remove_released_typing_key(&mut pressed_keys, keyval)
@@ -856,6 +1055,9 @@ fn handle_motion<W: RollView>(widget: &W, x: f64, y: f64) {
             || ds.orig_note.is_some()
             || ds.mode == DragMode::BoxSelect
             || ds.mode == DragMode::BulkMove
+            || ds.mode == DragMode::DrawPedal
+            || ds.mode == DragMode::ResizePedal
+            || ds.mode == DragMode::MovePedal
         {
             return;
         }
@@ -876,6 +1078,22 @@ fn handle_motion<W: RollView>(widget: &W, x: f64, y: f64) {
 
     if (abs_x - p_x).abs() < PLAYHEAD_HIT_RADIUS || y < TOP_REGION_HEIGHT {
         widget.set_roll_cursor(Some("col-resize"));
+        return;
+    }
+
+    let vp = widget.build_viewport();
+    if W::Layout::has_pedal_lane() && y >= vp.height - PEDAL_LANE_HEIGHT {
+        if let Some(midi) = &*s.data.borrow() {
+            if let Some((_, mode)) = hit_test_pedal(midi, act_track, zx, abs_x) {
+                if mode == DragMode::ResizePedal {
+                    widget.set_roll_cursor(Some("col-resize"));
+                } else {
+                    widget.set_roll_cursor(Some("grab"));
+                }
+                return;
+            }
+        }
+        widget.set_roll_cursor(Some("crosshair"));
         return;
     }
 
@@ -902,4 +1120,37 @@ fn handle_motion<W: RollView>(widget: &W, x: f64, y: f64) {
     }
 
     widget.set_roll_cursor(cursor_name);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hit_test_pedal_detects_body_and_resize_edge() {
+        let mut midi = crate::midi::MidiData::new_empty(&["Piano".into()]);
+        // Pedal from tick 480 to 960 (tps = 480 * 2 = 960 at 120 bpm)
+        // 480 ticks / 960 = 0.5s. At zoom_x = 100, x0 = 50.0px.
+        // 960 ticks / 960 = 1.0s. At zoom_x = 100, x1 = 100.0px.
+        midi.tracks[0].set_pedal_interval(480, 960, 0);
+
+        let zx = 100.0;
+        // Hit in the middle of pedal block (x = 70.0) -> MovePedal
+        let hit = hit_test_pedal(&midi, 0, zx, 70.0);
+        assert!(hit.is_some());
+        let (interval, mode) = hit.unwrap();
+        assert_eq!(interval.start_tick, 480);
+        assert_eq!(interval.end_tick, 960);
+        assert_eq!(mode, DragMode::MovePedal);
+
+        // Hit near the right edge (x = 98.0) -> ResizePedal
+        let hit_edge = hit_test_pedal(&midi, 0, zx, 98.0);
+        assert!(hit_edge.is_some());
+        let (_, mode_edge) = hit_edge.unwrap();
+        assert_eq!(mode_edge, DragMode::ResizePedal);
+
+        // Outside pedal block (x = 30.0) -> None
+        let hit_outside = hit_test_pedal(&midi, 0, zx, 30.0);
+        assert!(hit_outside.is_none());
+    }
 }
