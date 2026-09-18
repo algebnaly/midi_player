@@ -128,7 +128,7 @@ pub fn setup_controllers<W: RollView>(widget: &W) {
 
     let key_ctrl = gtk::EventControllerKey::new();
     let w = widget.clone();
-    key_ctrl.connect_key_pressed(move |_, keyval, _, _| handle_key_press(&w, keyval));
+    key_ctrl.connect_key_pressed(move |_, keyval, _, state| handle_key_press(&w, keyval, state));
     let w = widget.clone();
     key_ctrl.connect_key_released(move |_, keyval, _, _| handle_key_released(&w, keyval));
 
@@ -150,6 +150,12 @@ fn handle_right_click<W: RollView>(widget: &W, x: f64, y: f64) {
         return;
     }
     let s = widget.state();
+    if s.ghost_notes.borrow().is_some() {
+        *s.ghost_notes.borrow_mut() = None;
+        widget.redraw();
+        widget.update_status();
+        return;
+    }
     if *s.edit_mode.borrow() == EditMode::Select {
         return;
     }
@@ -265,6 +271,55 @@ fn handle_drag_begin<W: RollView>(
     let s = widget.state();
     widget.focus_roll();
 
+    if let Some(ghost) = s.ghost_notes.borrow_mut().take() {
+        let act_track = *s.active_track.borrow();
+        if let Some(target_pitch) = get_target_pitch(widget, start_y, act_track) {
+            let placed = {
+                if let Some(midi) = &mut *s.data.borrow_mut() {
+                    if act_track < midi.tracks.len() {
+                        let vp = widget.build_viewport();
+                        let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
+                        let raw_tick = vp.x_to_tick(start_x, tps);
+                        let target_tick = snap_tick(raw_tick.max(0.0) as u64, midi.ticks_per_beat);
+                        let before_len = midi.tracks[act_track].notes.len();
+                        for note in &ghost.notes {
+                            let delta_tick = note.start_tick as i64 - ghost.anchor_tick as i64;
+                            let start_tick = (target_tick as i64 + delta_tick).max(0) as u64;
+                            let dur = note.end_tick.saturating_sub(note.start_tick);
+                            let delta_pitch = note.pitch as i16 - ghost.anchor_pitch as i16;
+                            let pitch = (target_pitch as i16 + delta_pitch).clamp(0, 127) as u8;
+                            midi.tracks[act_track].notes.push(Note {
+                                pitch,
+                                velocity: note.velocity,
+                                start_tick,
+                                end_tick: start_tick + dur,
+                                channel: note.channel,
+                            });
+                        }
+                        let after_len = midi.tracks[act_track].notes.len();
+                        Some((before_len..after_len).collect::<std::collections::HashSet<_>>())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(new_sel) = placed {
+                *s.selected_notes.borrow_mut() = new_sel;
+                let synth_index = widget.active_synth_index();
+                if let Some(cb) = &*s.preview_note_on_callback.borrow() {
+                    cb(synth_index, target_pitch, 100, W::Layout::note_channel());
+                }
+                s.notify_data_changed();
+                widget.update_status();
+                widget.redraw();
+                return;
+            }
+        }
+    }
+
     {
         let mut ds = s.drag_state.borrow_mut();
         ds.is_dragging_playhead = false;
@@ -301,6 +356,9 @@ fn handle_drag_begin<W: RollView>(
             t = 0.0;
         }
         *s.playhead_time.borrow_mut() = t;
+        if let Some(cb) = &*s.seek_callback.borrow() {
+            cb(t);
+        }
         widget.redraw();
         return;
     }
@@ -698,9 +756,11 @@ fn handle_drag_end<W: RollView>(widget: &W, dx: f64, _dy: f64) {
         if t < 0.0 {
             t = 0.0;
         }
+        *s.playhead_time.borrow_mut() = t;
         if let Some(cb) = &*s.seek_callback.borrow() {
             cb(t);
         }
+        widget.redraw();
     } else if drag_mode == DragMode::DrawPedal {
         if let Some(orig) = s.drag_state.borrow().orig_pedal {
             let zx = *s.zoom_x.borrow();
@@ -879,9 +939,63 @@ fn handle_scroll<W: RollView>(
     glib::Propagation::Stop
 }
 
-fn handle_key_press<W: RollView>(widget: &W, keyval: gdk::Key) -> glib::Propagation {
+fn handle_key_press<W: RollView>(widget: &W, keyval: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
     let s = widget.state();
     let channel = W::Layout::note_channel();
+
+    if keyval == gdk::Key::Escape && s.ghost_notes.borrow().is_some() {
+        *s.ghost_notes.borrow_mut() = None;
+        widget.redraw();
+        widget.update_status();
+        return glib::Propagation::Stop;
+    }
+
+    if state.contains(gdk::ModifierType::CONTROL_MASK) {
+        if keyval == gdk::Key::c || keyval == gdk::Key::C {
+            if *s.edit_mode.borrow() == EditMode::Select {
+                if let Some(midi) = &*s.data.borrow() {
+                    let act = *s.active_track.borrow();
+                    if act < midi.tracks.len() {
+                        let sel = s.selected_notes.borrow();
+                        let mut notes = Vec::new();
+                        for &idx in sel.iter() {
+                            if let Some(n) = midi.tracks[act].notes.get(idx) {
+                                notes.push(n.clone());
+                            }
+                        }
+                        if !notes.is_empty() {
+                            let min_start_tick = notes.iter().map(|n| n.start_tick).min().unwrap_or(0);
+                            let anchor_pitch = notes
+                                .iter()
+                                .filter(|n| n.start_tick == min_start_tick)
+                                .map(|n| n.pitch)
+                                .min()
+                                .unwrap_or(notes[0].pitch);
+                            let ghost = GhostNotes {
+                                anchor_tick: min_start_tick,
+                                anchor_pitch,
+                                notes,
+                            };
+                            *s.clipboard.borrow_mut() = Some(ghost.clone());
+                            *s.ghost_notes.borrow_mut() = Some(ghost);
+                            widget.redraw();
+                            widget.update_status();
+                            return glib::Propagation::Stop;
+                        }
+                    }
+                }
+            }
+        } else if (keyval == gdk::Key::v || keyval == gdk::Key::V)
+            && *s.edit_mode.borrow() == EditMode::Select
+        {
+            if let Some(clip) = s.clipboard.borrow().clone() {
+                *s.ghost_notes.borrow_mut() = Some(clip);
+                widget.redraw();
+                widget.update_status();
+                return glib::Propagation::Stop;
+            }
+        }
+    }
 
     if (keyval == gdk::Key::l || keyval == gdk::Key::L) && widget.toggle_put_length_quantization() {
         return glib::Propagation::Stop;
@@ -890,6 +1004,7 @@ fn handle_key_press<W: RollView>(widget: &W, keyval: gdk::Key) -> glib::Propagat
     if let Some(action) =
         mode_key_action_from_state(keyval, &s.edit_mode, &s.typing_keyboard_enabled)
     {
+        *s.ghost_notes.borrow_mut() = None;
         match action {
             ModeKeyAction::EnterSelect => widget.enter_select_mode(),
             ModeKeyAction::EnterKeyboard => widget.enter_typing_keyboard_mode(),
@@ -1049,6 +1164,10 @@ fn handle_motion<W: RollView>(widget: &W, x: f64, y: f64) {
     *s.cursor_x.borrow_mut() = x;
     *s.cursor_y.borrow_mut() = y;
 
+    if s.ghost_notes.borrow().is_some() {
+        widget.redraw();
+    }
+
     {
         let ds = s.drag_state.borrow();
         if ds.is_dragging_playhead
@@ -1152,5 +1271,59 @@ mod tests {
         // Outside pedal block (x = 30.0) -> None
         let hit_outside = hit_test_pedal(&midi, 0, zx, 30.0);
         assert!(hit_outside.is_none());
+    }
+
+    #[test]
+    fn ghost_notes_relative_offset_calculation() {
+        let note1 = Note {
+            pitch: 60,
+            velocity: 100,
+            start_tick: 480,
+            end_tick: 720,
+            channel: 0,
+        };
+        let note2 = Note {
+            pitch: 67,
+            velocity: 90,
+            start_tick: 600,
+            end_tick: 840,
+            channel: 0,
+        };
+        let ghost = GhostNotes {
+            anchor_tick: 480,
+            anchor_pitch: 60,
+            notes: vec![note1, note2],
+        };
+
+        let target_tick = 960u64;
+        let target_pitch = 64u8;
+
+        let placed: Vec<Note> = ghost
+            .notes
+            .iter()
+            .map(|note| {
+                let delta_tick = note.start_tick as i64 - ghost.anchor_tick as i64;
+                let start_tick = (target_tick as i64 + delta_tick).max(0) as u64;
+                let dur = note.end_tick.saturating_sub(note.start_tick);
+                let delta_pitch = note.pitch as i16 - ghost.anchor_pitch as i16;
+                let pitch = (target_pitch as i16 + delta_pitch).clamp(0, 127) as u8;
+                Note {
+                    pitch,
+                    velocity: note.velocity,
+                    start_tick,
+                    end_tick: start_tick + dur,
+                    channel: note.channel,
+                }
+            })
+            .collect();
+
+        assert_eq!(placed.len(), 2);
+        assert_eq!(placed[0].pitch, 64);
+        assert_eq!(placed[0].start_tick, 960);
+        assert_eq!(placed[0].end_tick, 1200);
+
+        assert_eq!(placed[1].pitch, 71);
+        assert_eq!(placed[1].start_tick, 1080);
+        assert_eq!(placed[1].end_tick, 1320);
     }
 }

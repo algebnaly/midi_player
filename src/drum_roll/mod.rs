@@ -80,6 +80,18 @@ mod imp {
                         &*self.inner.selected_notes.borrow(),
                         &theme,
                     );
+                    if let Some(ghost) = &*self.inner.ghost_notes.borrow() {
+                        renderer::render_ghost_drum_notes(
+                            snapshot,
+                            &vp,
+                            midi,
+                            dm,
+                            ghost,
+                            *self.inner.cursor_x.borrow(),
+                            *self.inner.cursor_y.borrow(),
+                            &theme,
+                        );
+                    }
                 }
                 shared_renderer::render_playhead(
                     snapshot,

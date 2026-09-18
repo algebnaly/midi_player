@@ -72,6 +72,17 @@ mod imp {
                     &*self.inner.selected_notes.borrow(),
                     &theme,
                 );
+                if let Some(ghost) = &*self.inner.ghost_notes.borrow() {
+                    renderer::render_ghost_notes(
+                        snapshot,
+                        &vp,
+                        midi,
+                        ghost,
+                        *self.inner.cursor_x.borrow(),
+                        *self.inner.cursor_y.borrow(),
+                        &theme,
+                    );
+                }
             }
             if let Some(sel) = &*self.inner.selection_rect.borrow() {
                 shared_renderer::render_selection_rect::<MelodicLayout>(

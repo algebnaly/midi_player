@@ -21,7 +21,7 @@ pub const NOTE_EDGE_THRESHOLD: f64 = 8.0;
 /// Height (px) of the top region where a click always drags the playhead.
 pub const TOP_REGION_HEIGHT: f64 = 20.0;
 /// Height (px) of the bottom pedal lane in melodic roll.
-pub const PEDAL_LANE_HEIGHT: f64 = 26.0;
+pub const PEDAL_LANE_HEIGHT: f64 = 20.0;
 /// Minimum rendered width of a note so it stays visible at high zoom-out.
 pub const MIN_NOTE_WIDTH_PX: f64 = 2.0;
 
@@ -153,6 +153,19 @@ pub struct SelectionRect {
     pub abs_x1: f64,
     pub lane_lo: u8,
     pub lane_hi: u8,
+}
+
+// ── Ghost notes (copy / paste / follow cursor) ────────────────────────
+
+/// Buffer of notes being copied or previewed following the cursor.
+#[derive(Debug, Clone)]
+pub struct GhostNotes {
+    /// Reference anchor tick (e.g. earliest start_tick among copied notes).
+    pub anchor_tick: u64,
+    /// Reference anchor pitch (e.g. pitch of the earliest / bass note).
+    pub anchor_pitch: u8,
+    /// Cloned list of notes with original relative timings and pitches.
+    pub notes: Vec<Note>,
 }
 
 // ── Drag state ─────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 //! Header bar: file, MIDI, tracks, edit modes, BPM, gain, and playback.
 
 use gtk::prelude::*;
-use gtk::{ApplicationWindow, Box, Button, DropDown, HeaderBar, StringList, ToggleButton};
+use gtk::{ApplicationWindow, Box, Button, DropDown, HeaderBar, StringList, ToggleButton, MenuButton, Popover};
 use gtk4 as gtk;
 
 use crate::config::AppConfig;
@@ -20,7 +20,6 @@ pub struct HeaderWidgets {
     pub midi_refresh_btn: Button,
     pub bpm_spin: gtk::SpinButton,
     pub gain_scale: gtk::Scale,
-    pub plugin_gui_btn: Button,
     pub tracks_panel_btn: ToggleButton,
     pub velocity_panel_btn: ToggleButton,
     pub typing_kb_btn: ToggleButton,
@@ -65,7 +64,6 @@ pub fn build_header(window: &ApplicationWindow, config: &AppConfig) -> HeaderWid
     gain_box.append(&gtk::Label::new(Some("Gain: ")));
     gain_box.append(&gain_scale);
 
-    let plugin_gui_btn = Button::with_label("Plugin GUI");
     let tracks_panel_btn = ToggleButton::with_label("Tracks");
     tracks_panel_btn.set_tooltip_text(Some("Show or hide the floating track editor"));
     let velocity_panel_btn = ToggleButton::with_label("Velocity Curve");
@@ -88,22 +86,61 @@ pub fn build_header(window: &ApplicationWindow, config: &AppConfig) -> HeaderWid
          Draw a box to select notes, then drag to move them.",
     ));
 
-    header_bar.pack_start(&open_btn);
-    header_bar.pack_start(&save_project_btn);
-    header_bar.pack_start(&save_btn);
-    header_bar.pack_start(&midi_input_dropdown);
-    header_bar.pack_start(&midi_refresh_btn);
+    // --- LEFT SIDE ---
     header_bar.pack_start(&tracks_panel_btn);
-    header_bar.pack_start(&velocity_panel_btn);
-    header_bar.pack_start(&plugin_gui_btn);
     header_bar.pack_start(&select_mode_btn);
     header_bar.pack_start(&typing_kb_btn);
-    header_bar.pack_start(&bpm_box);
-    header_bar.pack_start(&gain_box);
 
-    header_bar.pack_end(&rewind_btn);
-    header_bar.pack_end(&pause_btn);
-    header_bar.pack_end(&play_btn);
+    // --- CENTER (Transport & BPM) ---
+    let transport_box = Box::new(gtk::Orientation::Horizontal, 6);
+    transport_box.append(&rewind_btn);
+    transport_box.append(&pause_btn);
+    transport_box.append(&play_btn);
+    
+    // Add a separator space
+    let separator = gtk::Label::new(Some("   "));
+    transport_box.append(&separator);
+    transport_box.append(&bpm_box);
+    
+    header_bar.set_title_widget(Some(&transport_box));
+
+    // --- RIGHT SIDE (Hamburger Menu) ---
+    let menu_button = MenuButton::new();
+    menu_button.set_icon_name("open-menu-symbolic");
+    
+    let popover = Popover::new();
+    let popover_vbox = Box::new(gtk::Orientation::Vertical, 8);
+    popover_vbox.set_margin_start(12);
+    popover_vbox.set_margin_end(12);
+    popover_vbox.set_margin_top(12);
+    popover_vbox.set_margin_bottom(12);
+    
+    // File section
+    popover_vbox.append(&gtk::Label::new(Some("File")));
+    popover_vbox.append(&open_btn);
+    popover_vbox.append(&save_project_btn);
+    popover_vbox.append(&save_btn);
+    
+    popover_vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    
+    // MIDI section
+    popover_vbox.append(&gtk::Label::new(Some("MIDI Settings")));
+    let midi_box = Box::new(gtk::Orientation::Horizontal, 4);
+    midi_box.append(&midi_input_dropdown);
+    midi_box.append(&midi_refresh_btn);
+    popover_vbox.append(&midi_box);
+    popover_vbox.append(&velocity_panel_btn);
+    
+    popover_vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    
+    // Global section
+    popover_vbox.append(&gtk::Label::new(Some("Global Settings")));
+    popover_vbox.append(&gain_box);
+    
+    popover.set_child(Some(&popover_vbox));
+    menu_button.set_popover(Some(&popover));
+    
+    header_bar.pack_end(&menu_button);
 
     HeaderWidgets {
         open_btn,
@@ -119,7 +156,6 @@ pub fn build_header(window: &ApplicationWindow, config: &AppConfig) -> HeaderWid
         midi_refresh_btn,
         bpm_spin,
         gain_scale,
-        plugin_gui_btn,
         tracks_panel_btn,
         velocity_panel_btn,
         typing_kb_btn,

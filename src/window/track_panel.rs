@@ -21,6 +21,7 @@ pub struct TrackPanel {
     pub move_up_btn: Button,
     pub move_down_btn: Button,
     pub instrument_btn: Button,
+    pub plugin_gui_btn: Button,
 }
 
 pub fn attach_track_panel(overlay: &gtk::Overlay, toggle_btn: &ToggleButton) -> TrackPanel {
@@ -114,9 +115,17 @@ pub fn attach_track_panel(overlay: &gtk::Overlay, toggle_btn: &ToggleButton) -> 
     let track_edit_row = Box::new(gtk::Orientation::Horizontal, 4);
     track_edit_row.append(&rename_btn);
     track_edit_row.append(&duplicate_btn);
-    let instrument_btn = Button::with_label("Instrument 🎹");
-    track_edit_row.append(&instrument_btn);
     track_panel.append(&track_edit_row);
+
+    let track_synth_row = Box::new(gtk::Orientation::Horizontal, 4);
+    let instrument_btn = Button::with_label("Instrument 🎹");
+    instrument_btn.set_hexpand(true);
+    let plugin_gui_btn = Button::with_label("Plugin GUI");
+    plugin_gui_btn.set_hexpand(true);
+    track_synth_row.append(&instrument_btn);
+    track_synth_row.append(&plugin_gui_btn);
+    track_panel.append(&track_synth_row);
+
     let track_action_row = Box::new(gtk::Orientation::Horizontal, 4);
     track_action_row.append(&add_btn);
     track_action_row.append(&delete_btn);
@@ -152,5 +161,6 @@ pub fn attach_track_panel(overlay: &gtk::Overlay, toggle_btn: &ToggleButton) -> 
         move_up_btn,
         move_down_btn,
         instrument_btn,
+        plugin_gui_btn,
     }
 }

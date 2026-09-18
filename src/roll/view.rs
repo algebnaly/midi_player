@@ -98,6 +98,10 @@ pub trait RollView: Clone + 'static {
         self.state().get_playhead_tick()
     }
 
+    fn get_playhead_time(&self) -> f64 {
+        *self.state().playhead_time.borrow()
+    }
+
     fn set_playhead_tick(&self, tick: f64) {
         if let Some(midi) = &*self.state().data.borrow() {
             let tps = midi.ticks_per_beat as f64 * (midi.get_bpm() / 60.0);

@@ -57,14 +57,14 @@ pub fn wire_playback(
         if let Some(midi) = pr_play.get_data_clone()
             && let Some(p) = &*player_clone.borrow()
         {
+            let target_time = pr_play.get_playhead_time();
             if p.is_paused() {
-                let current_time = p.get_time();
-                if let Err(e) = p.hot_swap(midi, current_time) {
+                if let Err(e) = p.hot_swap(midi, target_time) {
                     eprintln!("Failed to hot-swap on resume: {}", e);
                 }
                 p.resume();
             } else if !p.is_playing() {
-                if let Err(e) = p.play(midi) {
+                if let Err(e) = p.play_from(midi, target_time) {
                     eprintln!("Failed to play: {}", e);
                 }
             }
@@ -88,7 +88,8 @@ pub fn wire_playback(
         if let Some(midi) = pr_rewind.get_data_clone()
             && let Some(p) = &*player_clone_rewind.borrow()
         {
-            if let Err(e) = p.play(midi) {
+            pr_rewind.set_playhead(0.0);
+            if let Err(e) = p.play_from(midi, 0.0) {
                 eprintln!("Failed to play: {}", e);
             } else {
                 *is_playing_rewind.borrow_mut() = true;
@@ -119,16 +120,16 @@ pub fn wire_playback(
                     p.pause();
                     *playing = false;
                 } else {
+                    let target_time = pr_key.get_playhead_time();
                     if p.is_paused() {
                         if let Some(midi) = pr_key.get_data_clone() {
-                            let current_time = p.get_time();
-                            if let Err(e) = p.hot_swap(midi, current_time) {
+                            if let Err(e) = p.hot_swap(midi, target_time) {
                                 eprintln!("Failed to hot-swap on resume: {}", e);
                             }
                         }
                         p.resume();
                     } else if let Some(midi) = pr_key.get_data_clone()
-                        && let Err(e) = p.play(midi)
+                        && let Err(e) = p.play_from(midi, target_time)
                     {
                         eprintln!("Failed to play: {}", e);
                     }

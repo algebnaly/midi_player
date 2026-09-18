@@ -196,7 +196,7 @@ pub fn build_ui(app: &gtk::Application, initial_file: Option<String>) {
         &header.play_btn,
         &header.pause_btn,
         &header.rewind_btn,
-        &header.plugin_gui_btn,
+        &track_panel.plugin_gui_btn,
         &header.bpm_spin,
         &piano_roll,
         player.clone(),

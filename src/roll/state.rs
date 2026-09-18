@@ -1,7 +1,7 @@
 //! Mutable roll state shared by piano and drum GObject widgets.
 
 use super::types::{
-    DragState, EditMode, SelectionRect, has_exact_note, note_name, put_note_length,
+    DragState, EditMode, GhostNotes, SelectionRect, has_exact_note, note_name, put_note_length,
     snap_tick_to_beat,
 };
 use crate::midi::{MidiData, Note, TrackId};
@@ -50,6 +50,8 @@ pub struct RollState {
 
     pub default_note_beats: RefCell<f64>,
     pub pedal_active: RefCell<bool>,
+    pub clipboard: RefCell<Option<GhostNotes>>,
+    pub ghost_notes: RefCell<Option<GhostNotes>>,
 
     #[allow(clippy::type_complexity)]
     pub seek_callback: RefCell<Option<Box<dyn Fn(f64)>>>,
@@ -91,6 +93,8 @@ impl Default for RollState {
             put_length_quantization_enabled: RefCell::new(false),
             default_note_beats: RefCell::new(1.0),
             pedal_active: RefCell::new(false),
+            clipboard: RefCell::new(None),
+            ghost_notes: RefCell::new(None),
             seek_callback: RefCell::new(None),
             data_changed_callback: RefCell::new(None),
             preview_note_on_callback: RefCell::new(None),

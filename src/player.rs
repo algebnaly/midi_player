@@ -273,8 +273,8 @@ impl Player {
     // Playback controls
     // ------------------------------------------------------------------
 
-    /// Start playing the given MIDI data from the beginning.
-    pub fn play(&self, data: MidiData) -> anyhow::Result<()> {
+    /// Start playing the given MIDI data from a specified timestamp.
+    pub fn play_from(&self, data: MidiData, start_time: f64) -> anyhow::Result<()> {
         let bpm = data.get_bpm();
         *self.current_midi.lock().unwrap() = Some(data.clone());
         let mut seq = self.sequencer.lock().unwrap();
@@ -282,12 +282,21 @@ impl Player {
         let live_notes = self.live_notes.lock().unwrap();
         seq.silence_sequence_notes(&mut s_vec, &live_notes);
         seq.load(&data);
+        if start_time > 0.0 {
+            seq.seek(start_time, &mut s_vec, &live_notes);
+        }
         // Propagate BPM to CLAP plugins so their transport matches.
         for synth in s_vec.iter_mut() {
             synth.set_tempo(bpm);
         }
         self.paused.store(false, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Start playing the given MIDI data from the beginning.
+    #[allow(dead_code)]
+    pub fn play(&self, data: MidiData) -> anyhow::Result<()> {
+        self.play_from(data, 0.0)
     }
 
     /// Pause playback and silence all notes.

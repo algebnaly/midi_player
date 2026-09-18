@@ -221,3 +221,56 @@ pub fn render_pedal_lane(
         }
     }
 }
+
+/// Render translucent ghost notes that follow the mouse cursor during paste/drop mode.
+pub fn render_ghost_notes(
+    snapshot: &gtk::Snapshot,
+    vp: &Viewport,
+    midi: &MidiData,
+    ghost: &crate::roll::types::GhostNotes,
+    cursor_x: f64,
+    cursor_y: f64,
+    _theme: &Theme,
+) {
+    let kw = crate::roll::types::KEY_WIDTH as f32;
+    let width = vp.width as f32;
+    let height = vp.height as f32;
+    if (cursor_x as f32) < kw {
+        return;
+    }
+
+    let tps = Viewport::ticks_per_sec(midi.ticks_per_beat, midi.get_bpm());
+    let raw_tick = vp.x_to_tick(cursor_x, tps);
+    let target_tick = crate::roll::types::snap_tick(raw_tick.max(0.0) as u64, midi.ticks_per_beat);
+    let target_pitch = vp.y_to_pitch(cursor_y).clamp(0, 127) as u8;
+
+    let ghost_fill = gtk::gdk::RGBA::new(0.25, 0.7, 1.0, 0.45);
+    let ghost_border = gtk::gdk::RGBA::new(1.0, 1.0, 1.0, 0.85);
+
+    for note in &ghost.notes {
+        let delta_tick = note.start_tick as i64 - ghost.anchor_tick as i64;
+        let start_tick = (target_tick as i64 + delta_tick).max(0) as u64;
+        let dur = note.end_tick.saturating_sub(note.start_tick);
+        let delta_pitch = note.pitch as i16 - ghost.anchor_pitch as i16;
+        let pitch = (target_pitch as i16 + delta_pitch).clamp(0, 127) as u8;
+
+        let ghost_note = crate::midi::Note {
+            pitch,
+            velocity: note.velocity,
+            start_tick,
+            end_tick: start_tick + dur,
+            channel: note.channel,
+        };
+
+        let (x, y, w, h) = vp.note_rect(&ghost_note, tps);
+        let (x, y, w, h) = (x as f32, y as f32, w as f32, h as f32);
+
+        if x + w > kw && x < width && y + h > 0.0 && y < height {
+            snapshot.append_color(&ghost_fill, &graphene::Rect::new(x, y, w, h));
+            snapshot.append_color(&ghost_border, &graphene::Rect::new(x, y, w, 1.0));
+            snapshot.append_color(&ghost_border, &graphene::Rect::new(x, y + h - 1.0, w, 1.0));
+            snapshot.append_color(&ghost_border, &graphene::Rect::new(x, y, 1.0, h));
+            snapshot.append_color(&ghost_border, &graphene::Rect::new(x + w - 1.0, y, 1.0, h));
+        }
+    }
+}

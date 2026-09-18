@@ -253,17 +253,38 @@ impl RollStack {
 
     pub fn connect_status<F: Fn(String) + 'static>(&self, f: F) {
         let rc = Rc::new(f);
-        self.cb_status.borrow_mut().push(rc);
+        self.cb_status.borrow_mut().push(rc.clone());
+        for w in self.widgets.borrow().iter() {
+            let cb = rc.clone();
+            match w {
+                RollWidget::Melodic(mw) => mw.connect_status(move |s| cb(s.to_string())),
+                RollWidget::Drum(dw) => dw.connect_status(move |s| cb(s.to_string())),
+            }
+        }
     }
 
     pub fn connect_seek<F: Fn(f64) + 'static>(&self, f: F) {
         let rc = Rc::new(f);
-        self.cb_seek.borrow_mut().push(rc);
+        self.cb_seek.borrow_mut().push(rc.clone());
+        for w in self.widgets.borrow().iter() {
+            let cb = rc.clone();
+            match w {
+                RollWidget::Melodic(mw) => mw.connect_seek(move |t| cb(t)),
+                RollWidget::Drum(dw) => dw.connect_seek(move |t| cb(t)),
+            }
+        }
     }
 
     pub fn connect_data_changed<F: Fn() + 'static>(&self, f: F) {
         let rc = Rc::new(f);
-        self.cb_data_changed.borrow_mut().push(rc);
+        self.cb_data_changed.borrow_mut().push(rc.clone());
+        for w in self.widgets.borrow().iter() {
+            let cb = rc.clone();
+            match w {
+                RollWidget::Melodic(mw) => mw.connect_data_changed(move || cb()),
+                RollWidget::Drum(dw) => dw.connect_data_changed(move || cb()),
+            }
+        }
     }
 
     pub fn connect_preview_note_on<F: Fn(usize, u8, u8, u8) + 'static>(&self, f: F) {
@@ -497,6 +518,18 @@ impl RollStack {
             match w {
                 RollWidget::Melodic(mw) => mw.get_playhead_tick(),
                 RollWidget::Drum(dw) => dw.get_playhead_tick(),
+            }
+        } else {
+            0.0
+        }
+    }
+
+    pub fn get_playhead_time(&self) -> f64 {
+        let widgets = self.widgets.borrow();
+        if let Some(w) = widgets.get(self.active_idx.get()) {
+            match w {
+                RollWidget::Melodic(mw) => mw.get_playhead_time(),
+                RollWidget::Drum(dw) => dw.get_playhead_time(),
             }
         } else {
             0.0
