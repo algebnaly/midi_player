@@ -3,3 +3,9 @@
 res/
 **/*.clap
 references/
+*.mp3
+*.wav
+*.mid
+*.midiproj
+
+

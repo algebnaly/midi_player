@@ -63,13 +63,10 @@ impl RollStack {
 
     fn create_widget(&self, track_idx: usize, is_drum: bool) -> RollWidget {
         let widgets_clone = Rc::clone(&self.widgets);
-        let active_idx_clone = Rc::clone(&self.active_idx);
         let cb_data_changed_ref = Rc::clone(&self.cb_data_changed);
 
         let on_data_changed = move || {
-            let current_idx = active_idx_clone.get();
-
-            let maybe_midi = if let Some(active_w) = widgets_clone.borrow().get(current_idx) {
+            let maybe_midi = if let Some(active_w) = widgets_clone.borrow().get(track_idx) {
                 match active_w {
                     RollWidget::Melodic(mw) => mw.get_data_clone(),
                     RollWidget::Drum(dw) => dw.get_data_clone(),
@@ -80,7 +77,7 @@ impl RollStack {
 
             if let Some(midi) = maybe_midi {
                 for (i, w) in widgets_clone.borrow().iter().enumerate() {
-                    if i != current_idx {
+                    if i != track_idx {
                         match w {
                             RollWidget::Melodic(mw) => mw.update_data(midi.clone()),
                             RollWidget::Drum(dw) => dw.update_data(midi.clone()),
@@ -174,6 +171,12 @@ impl RollStack {
             widgets.push(new_widget);
         }
 
+        while widgets.len() > midi.tracks.len() {
+            if let Some(w) = widgets.pop() {
+                self.stack.remove(w.widget());
+            }
+        }
+
         for (i, w) in widgets.iter().enumerate() {
             if i < midi.tracks.len() {
                 match w {
@@ -207,7 +210,8 @@ impl RollStack {
 
     pub fn get_data_clone(&self) -> Option<MidiData> {
         let widgets = self.widgets.borrow();
-        if let Some(w) = widgets.first() {
+        let idx = self.active_idx.get();
+        if let Some(w) = widgets.get(idx).or_else(|| widgets.first()) {
             match w {
                 RollWidget::Melodic(mw) => mw.get_data_clone(),
                 RollWidget::Drum(dw) => dw.get_data_clone(),
@@ -218,11 +222,8 @@ impl RollStack {
     }
 
     pub fn notify_data_changed(&self) {
-        for w in self.widgets.borrow().iter() {
-            match w {
-                RollWidget::Melodic(mw) => mw.notify_data_changed(),
-                RollWidget::Drum(dw) => dw.notify_data_changed(),
-            }
+        for cb in self.cb_data_changed.borrow().iter() {
+            cb();
         }
     }
 
@@ -277,14 +278,7 @@ impl RollStack {
 
     pub fn connect_data_changed<F: Fn() + 'static>(&self, f: F) {
         let rc = Rc::new(f);
-        self.cb_data_changed.borrow_mut().push(rc.clone());
-        for w in self.widgets.borrow().iter() {
-            let cb = rc.clone();
-            match w {
-                RollWidget::Melodic(mw) => mw.connect_data_changed(move || cb()),
-                RollWidget::Drum(dw) => dw.connect_data_changed(move || cb()),
-            }
-        }
+        self.cb_data_changed.borrow_mut().push(rc);
     }
 
     pub fn connect_preview_note_on<F: Fn(usize, u8, u8, u8) + 'static>(&self, f: F) {

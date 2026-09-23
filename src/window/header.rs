@@ -10,6 +10,8 @@ pub struct HeaderWidgets {
     pub open_btn: Button,
     pub save_project_btn: Button,
     pub save_btn: Button,
+    pub export_wav_btn: Button,
+    pub export_mp3_btn: Button,
     pub play_btn: Button,
     pub pause_btn: Button,
     pub rewind_btn: Button,
@@ -32,7 +34,9 @@ pub fn build_header(window: &ApplicationWindow, config: &AppConfig) -> HeaderWid
 
     let open_btn = Button::with_label("Open");
     let save_project_btn = Button::with_label("Save Project");
-    let save_btn = Button::with_label("Export");
+    let save_btn = Button::with_label("Export MIDI");
+    let export_wav_btn = Button::with_label("Export WAV");
+    let export_mp3_btn = Button::with_label("Export MP3");
     let play_btn = Button::with_label("Play");
     let pause_btn = Button::with_label("Pause");
     let rewind_btn = Button::with_label("Start Over");
@@ -120,6 +124,8 @@ pub fn build_header(window: &ApplicationWindow, config: &AppConfig) -> HeaderWid
     popover_vbox.append(&open_btn);
     popover_vbox.append(&save_project_btn);
     popover_vbox.append(&save_btn);
+    popover_vbox.append(&export_wav_btn);
+    popover_vbox.append(&export_mp3_btn);
     
     popover_vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     
@@ -146,6 +152,8 @@ pub fn build_header(window: &ApplicationWindow, config: &AppConfig) -> HeaderWid
         open_btn,
         save_project_btn,
         save_btn,
+        export_wav_btn,
+        export_mp3_btn,
         play_btn,
         pause_btn,
         rewind_btn,

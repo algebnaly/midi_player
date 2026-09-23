@@ -52,8 +52,36 @@ impl SoundbankManager {
                             "sf2" => {
                                 banks.push(Soundbank {
                                     name: format!("{} [SF2]", name),
-                                    source: SynthSource::SoundFont { path: path_str },
+                                    source: SynthSource::SoundFont {
+                                        path: path_str.clone(),
+                                        bank: 0,
+                                        preset: 0,
+                                    },
                                 });
+                                if name.contains("GeneralUser") || name.contains("FluidR3") {
+                                    let gm_instruments: &[(u8, &str)] = &[
+                                        (0, "Acoustic Grand Piano"),
+                                        (24, "Acoustic Guitar (Nylon)"),
+                                        (25, "Acoustic Guitar (Steel)"),
+                                        (32, "Acoustic Bass"),
+                                        (40, "Violin"),
+                                        (42, "Cello"),
+                                        (43, "Contrabass / Double Bass"),
+                                        (45, "Pizzicato Strings"),
+                                        (48, "String Ensemble 1"),
+                                        (73, "Flute"),
+                                    ];
+                                    for &(preset_id, inst_name) in gm_instruments {
+                                        banks.push(Soundbank {
+                                            name: format!("{} - {} [SF2]", name, inst_name),
+                                            source: SynthSource::SoundFont {
+                                                path: path_str.clone(),
+                                                bank: 0,
+                                                preset: preset_id,
+                                            },
+                                        });
+                                    }
+                                }
                             }
                             "sfz" => {
                                 banks.push(Soundbank {

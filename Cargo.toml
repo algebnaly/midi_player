@@ -19,3 +19,5 @@ oxisynth = "0.1.0"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 sfizz-rs = { path = "../sfizz-rs" }
+hound = "3.5.1"
+mp3lame-encoder = "0.2.5"

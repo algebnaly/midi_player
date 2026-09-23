@@ -65,7 +65,13 @@ pub struct TrackInputSettings {
 /// Describes which synthesizer backend a track should use.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SynthSource {
-    SoundFont { path: String },
+    SoundFont {
+        path: String,
+        #[serde(default)]
+        bank: u32,
+        #[serde(default)]
+        preset: u8,
+    },
     ClapPlugin { path: String },
     Sfz { path: String },
 }
@@ -74,6 +80,8 @@ impl Default for SynthSource {
     fn default() -> Self {
         SynthSource::SoundFont {
             path: String::new(),
+            bank: 0,
+            preset: 0,
         }
     }
 }
@@ -362,6 +370,8 @@ impl MidiData {
             let mut control_events = Vec::new();
             let mut name = None;
 
+            let mut initial_program: Option<u8> = None;
+
             for event in track {
                 current_tick += event.delta.as_int() as u64;
 
@@ -397,6 +407,9 @@ impl MidiData {
                                         channel: ch,
                                     });
                                 }
+                            }
+                            MidiMessage::ProgramChange { program } => {
+                                initial_program.get_or_insert(program.as_int());
                             }
                             MidiMessage::Controller { controller, value } => {
                                 control_events.push(ControlEvent {
@@ -438,13 +451,18 @@ impl MidiData {
                 } else {
                     TrackMode::default()
                 };
+                let preset = initial_program.unwrap_or(0);
                 tracks.push(TrackData {
                     id: TrackId(tracks.len() as u64 + 1),
                     name: name.unwrap_or_else(|| format!("Track {}", tracks.len())),
                     notes,
                     control_events,
                     synth_index: 0,
-                    synth_source: SynthSource::default(),
+                    synth_source: SynthSource::SoundFont {
+                        path: String::new(),
+                        bank: 0,
+                        preset,
+                    },
                     mixer: TrackMixerSettings::default(),
                     input: TrackInputSettings::default(),
                     mode,

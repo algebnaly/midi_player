@@ -86,6 +86,7 @@ pub trait RollView: Clone + 'static {
         self.redraw();
     }
 
+    #[allow(dead_code)]
     fn notify_data_changed(&self) {
         self.state().notify_data_changed();
     }

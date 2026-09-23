@@ -16,6 +16,8 @@ pub fn wire_file_actions(
     open_btn: &gtk::Button,
     save_btn: &gtk::Button,
     save_project_btn: &gtk::Button,
+    export_wav_btn: &gtk::Button,
+    export_mp3_btn: &gtk::Button,
     tracks: &TrackUi,
     bpm_spin: &gtk::SpinButton,
     current_midi_path: Rc<RefCell<Option<String>>>,
@@ -27,7 +29,7 @@ pub fn wire_file_actions(
     let current_midi_clone = current_midi_path;
     let tracks_open = tracks.clone();
     let bpm_spin_open = bpm_spin.clone();
-    let player_open = player;
+    let player_open = player.clone();
     open_btn.connect_clicked(move |_| {
         let dialog = gtk::FileDialog::new();
         let window = window_clone.clone();
@@ -58,13 +60,21 @@ pub fn wire_file_actions(
                             for track in &mut data.tracks {
                                 let is_drum = matches!(&track.mode, TrackMode::Drum(_));
                                 if !is_project {
+                                    let initial_preset = match &track.synth_source {
+                                        crate::midi::SynthSource::SoundFont { preset, .. } => *preset,
+                                        _ => 0,
+                                    };
                                     track.synth_source = if is_drum && !def_drum_sf2.is_empty() {
                                         crate::midi::SynthSource::SoundFont {
                                             path: def_drum_sf2.clone(),
+                                            bank: 0,
+                                            preset: 0,
                                         }
                                     } else {
                                         crate::midi::SynthSource::SoundFont {
                                             path: def_sf2.clone(),
+                                            bank: 0,
+                                            preset: initial_preset,
                                         }
                                     };
                                 }
@@ -126,6 +136,80 @@ pub fn wire_file_actions(
                 }
                 if let Err(err) = ProjectFile::new(midi).save(&path) {
                     eprintln!("Failed to save project: {err}");
+                }
+            }
+        });
+    });
+
+    let tracks_export_wav = tracks.clone();
+    let window_export_wav = window.clone();
+    let player_export_wav = player.clone();
+    export_wav_btn.connect_clicked(move |_| {
+        let Some(midi) = tracks_export_wav.roll.get_data_clone() else {
+            return;
+        };
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title("Export Audio (WAV)");
+        dialog.set_initial_name(Some("output.wav"));
+        let window = window_export_wav.clone();
+        let p_cell = player_export_wav.clone();
+        dialog.save(Some(&window), None::<&gtk::gio::Cancellable>, move |res| {
+            if let Ok(file) = res
+                && let Some(mut path) = file.path()
+            {
+                if path.extension().is_none_or(|ext| ext != "wav") {
+                    path.set_extension("wav");
+                }
+                let mut p = p_cell.borrow_mut();
+                if let Some(player) = p.as_mut() {
+                    println!("Rendering WAV audio offline...");
+                    match player.render_offline(&midi) {
+                        Ok((left, right, sample_rate)) => {
+                            if let Err(e) = crate::audio_export::export_wav(&path, &left, &right, sample_rate) {
+                                eprintln!("Failed to export WAV: {}", e);
+                            } else {
+                                println!("✅ Successfully exported WAV: {}", path.display());
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to render audio: {}", e),
+                    }
+                }
+            }
+        });
+    });
+
+    let tracks_export_mp3 = tracks.clone();
+    let window_export_mp3 = window.clone();
+    let player_export_mp3 = player.clone();
+    export_mp3_btn.connect_clicked(move |_| {
+        let Some(midi) = tracks_export_mp3.roll.get_data_clone() else {
+            return;
+        };
+        let dialog = gtk::FileDialog::new();
+        dialog.set_title("Export Audio (MP3)");
+        dialog.set_initial_name(Some("output.mp3"));
+        let window = window_export_mp3.clone();
+        let p_cell = player_export_mp3.clone();
+        dialog.save(Some(&window), None::<&gtk::gio::Cancellable>, move |res| {
+            if let Ok(file) = res
+                && let Some(mut path) = file.path()
+            {
+                if path.extension().is_none_or(|ext| ext != "mp3") {
+                    path.set_extension("mp3");
+                }
+                let mut p = p_cell.borrow_mut();
+                if let Some(player) = p.as_mut() {
+                    println!("Rendering MP3 audio offline...");
+                    match player.render_offline(&midi) {
+                        Ok((left, right, sample_rate)) => {
+                            if let Err(e) = crate::audio_export::export_mp3(&path, &left, &right, sample_rate) {
+                                eprintln!("Failed to export MP3: {}", e);
+                            } else {
+                                println!("✅ Successfully exported MP3: {}", path.display());
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to render audio: {}", e),
+                    }
                 }
             }
         });

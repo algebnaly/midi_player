@@ -191,6 +191,8 @@ impl Player {
         loaded_synths.insert(
             crate::midi::SynthSource::SoundFont {
                 path: sf2_path.to_string(),
+                bank: 0,
+                preset: 0,
             },
             0,
         );
@@ -198,6 +200,8 @@ impl Player {
             loaded_synths.insert(
                 crate::midi::SynthSource::SoundFont {
                     path: drum_sf2_path.to_string(),
+                    bank: 0,
+                    preset: 0,
                 },
                 drum_synth_index,
             );
@@ -234,12 +238,17 @@ impl Player {
         }
 
         let (new_synth, gui_handle) = match source {
-            crate::midi::SynthSource::SoundFont { path } => {
+            crate::midi::SynthSource::SoundFont { path, bank, preset } => {
                 let font = Self::load_soundfont(path)?;
                 let mut synth = oxisynth::Synth::default();
                 synth.set_gain(1.0);
                 synth.set_sample_rate(self.sample_rate as f32);
-                synth.add_font(font, true);
+                let font_id = synth.add_font(font, true);
+                if *bank != 0 || *preset != 0 {
+                    for ch in 0..16 {
+                        let _ = synth.select_program(ch, font_id, *bank, *preset);
+                    }
+                }
                 (crate::synth::TrackSynth::SoundFont(synth), None)
             }
             crate::midi::SynthSource::Sfz { path } => {
@@ -532,6 +541,91 @@ impl Player {
                 gui.poll_callbacks();
             }
         }
+    }
+
+    /// Render the given MIDI data offline (faster than real-time) to stereo audio buffers.
+    /// Returns `(left_samples, right_samples, sample_rate)`.
+    pub fn render_offline(
+        &mut self,
+        data: &crate::midi::MidiData,
+    ) -> anyhow::Result<(Vec<f32>, Vec<f32>, u32)> {
+        self.pause();
+
+        let mut midi = data.clone();
+        for track in &mut midi.tracks {
+            let idx = self.add_or_get_synth(&track.synth_source)?;
+            track.synth_index = idx;
+        }
+
+        let mut seq = self.sequencer.lock().unwrap();
+        let mut synths = self.synths.lock().unwrap();
+        let live_notes = self.live_notes.lock().unwrap();
+
+        seq.silence_sequence_notes(&mut synths, &live_notes);
+        for synth in synths.iter_mut() {
+            synth.all_notes_off();
+        }
+
+        let sample_rate = self.sample_rate;
+        let mut offline_seq = crate::sequencer::CustomSequencer::new();
+        offline_seq.load(&midi);
+        let song_duration = offline_seq.loop_end_time;
+        // Disable loop so offline render progresses linearly to completion
+        offline_seq.loop_end_time = 0.0;
+
+        let tail_seconds = 1.5;
+        let total_seconds = song_duration + tail_seconds;
+        let total_frames = (total_seconds * sample_rate).ceil() as usize;
+
+        let mut full_left = Vec::with_capacity(total_frames);
+        let mut full_right = Vec::with_capacity(total_frames);
+
+        let chunk_size = 2048;
+        let mut buf_l = vec![0.0f32; chunk_size];
+        let mut buf_r = vec![0.0f32; chunk_size];
+        let empty_live_notes = std::collections::HashMap::new();
+
+        let mut frames_done = 0;
+        while frames_done < total_frames {
+            let to_render = chunk_size.min(total_frames - frames_done);
+            let chunk_l = &mut buf_l[..to_render];
+            let chunk_r = &mut buf_r[..to_render];
+            chunk_l.fill(0.0);
+            chunk_r.fill(0.0);
+
+            offline_seq.render_block(&mut synths, &empty_live_notes, chunk_l, chunk_r, sample_rate);
+
+            full_left.extend_from_slice(chunk_l);
+            full_right.extend_from_slice(chunk_r);
+            frames_done += to_render;
+        }
+
+        let global_gain = f32::from_bits(self.global_gain.load(Ordering::Relaxed));
+        for (l, r) in full_left.iter_mut().zip(full_right.iter_mut()) {
+            *l *= global_gain;
+            *r *= global_gain;
+        }
+
+        let peak = full_left
+            .iter()
+            .chain(full_right.iter())
+            .fold(0.0f32, |m, &x| m.max(x.abs()));
+        if peak > 1.0 {
+            let scale = 0.99 / peak;
+            for (l, r) in full_left.iter_mut().zip(full_right.iter_mut()) {
+                *l *= scale;
+                *r *= scale;
+            }
+        }
+
+        for synth in synths.iter_mut() {
+            synth.all_notes_off();
+        }
+        if let Some(current) = self.current_midi.lock().unwrap().as_ref() {
+            seq.load(current);
+        }
+
+        Ok((full_left, full_right, sample_rate as u32))
     }
 
     // ------------------------------------------------------------------

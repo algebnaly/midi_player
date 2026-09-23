@@ -71,4 +71,59 @@ mod tests {
         assert_eq!(decoded.midi.tracks[1].mixer.pan, 0.4);
         assert!(decoded.midi.tracks[1].input.armed);
     }
+
+    #[test]
+    fn project_soundfont_preset_round_trip_and_backward_compatibility() {
+        let mut midi = MidiData::new_empty(&["Pizzicato".into()]);
+        midi.tracks[0].synth_source = crate::midi::SynthSource::SoundFont {
+            path: "/path/to/GeneralUser-GS.sf2".into(),
+            bank: 0,
+            preset: 45,
+        };
+
+        let encoded = toml::to_string_pretty(&ProjectFile::new(midi)).unwrap();
+        assert!(encoded.contains("preset = 45"));
+        let decoded: ProjectFile = toml::from_str(&encoded).unwrap();
+        match &decoded.midi.tracks[0].synth_source {
+            crate::midi::SynthSource::SoundFont { path, bank, preset } => {
+                assert_eq!(path, "/path/to/GeneralUser-GS.sf2");
+                assert_eq!(*bank, 0);
+                assert_eq!(*preset, 45);
+            }
+            _ => panic!("Expected SoundFont synth source"),
+        }
+
+        // Backward compatibility: old format without bank/preset
+        let old_toml = r#"
+schema_version = 1
+[midi]
+ticks_per_beat = 480
+tempo_map = [[0, 500000]]
+next_track_id = 2
+
+[[midi.tracks]]
+id = 1
+name = "Legacy Track"
+notes = []
+mode = "Melodic"
+synth_source = { SoundFont = { path = "/path/to/old.sf2" } }
+[midi.tracks.mixer]
+mute = false
+solo = false
+volume_db = 0.0
+pan = 0.0
+[midi.tracks.input]
+armed = false
+transpose = 0
+"#;
+        let legacy_decoded: ProjectFile = toml::from_str(old_toml).unwrap();
+        match &legacy_decoded.midi.tracks[0].synth_source {
+            crate::midi::SynthSource::SoundFont { path, bank, preset } => {
+                assert_eq!(path, "/path/to/old.sf2");
+                assert_eq!(*bank, 0);
+                assert_eq!(*preset, 0);
+            }
+            _ => panic!("Expected SoundFont synth source"),
+        }
+    }
 }

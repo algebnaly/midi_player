@@ -50,12 +50,16 @@ pub fn attach_track_panel(overlay: &gtk::Overlay, toggle_btn: &ToggleButton) -> 
     track_panel.append(&track_panel_header);
 
     let mute_btn = ToggleButton::with_label("M");
+    mute_btn.add_css_class("track-btn-mute");
     mute_btn.set_tooltip_text(Some("Mute selected track"));
     let solo_btn = ToggleButton::with_label("S");
+    solo_btn.add_css_class("track-btn-solo");
     solo_btn.set_tooltip_text(Some("Solo selected track"));
     let arm_btn = ToggleButton::with_label("R");
+    arm_btn.add_css_class("track-btn-arm");
     arm_btn.set_tooltip_text(Some("Route physical MIDI input to this track"));
     let track_state_row = Box::new(gtk::Orientation::Horizontal, 4);
+    track_state_row.set_homogeneous(true);
     track_state_row.append(&mute_btn);
     track_state_row.append(&solo_btn);
     track_state_row.append(&arm_btn);
@@ -94,6 +98,7 @@ pub fn attach_track_panel(overlay: &gtk::Overlay, toggle_btn: &ToggleButton) -> 
     list_box.add_css_class("boxed-list");
     let track_scroller = gtk::ScrolledWindow::new();
     track_scroller.set_vexpand(true);
+    track_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     track_scroller.set_child(Some(&list_box));
     track_panel.append(&track_scroller);
 
@@ -113,11 +118,13 @@ pub fn attach_track_panel(overlay: &gtk::Overlay, toggle_btn: &ToggleButton) -> 
     move_down_btn.set_tooltip_text(Some("Move track down"));
 
     let track_edit_row = Box::new(gtk::Orientation::Horizontal, 4);
+    track_edit_row.set_homogeneous(true);
     track_edit_row.append(&rename_btn);
     track_edit_row.append(&duplicate_btn);
     track_panel.append(&track_edit_row);
 
     let track_synth_row = Box::new(gtk::Orientation::Horizontal, 4);
+    track_synth_row.set_homogeneous(true);
     let instrument_btn = Button::with_label("Instrument 🎹");
     instrument_btn.set_hexpand(true);
     let plugin_gui_btn = Button::with_label("Plugin GUI");
@@ -127,6 +134,7 @@ pub fn attach_track_panel(overlay: &gtk::Overlay, toggle_btn: &ToggleButton) -> 
     track_panel.append(&track_synth_row);
 
     let track_action_row = Box::new(gtk::Orientation::Horizontal, 4);
+    track_action_row.set_homogeneous(true);
     track_action_row.append(&add_btn);
     track_action_row.append(&delete_btn);
     track_action_row.append(&move_up_btn);

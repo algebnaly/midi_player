@@ -175,6 +175,8 @@ pub fn build_ui(app: &gtk::Application, initial_file: Option<String>) {
         &header.open_btn,
         &header.save_btn,
         &header.save_project_btn,
+        &header.export_wav_btn,
+        &header.export_mp3_btn,
         &tracks,
         &header.bpm_spin,
         current_midi_path.clone(),

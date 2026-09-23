@@ -443,7 +443,7 @@ impl CustomSequencer {
     /// seconds.
     ///
     /// A "bar" is `BEATS_PER_BAR * ticks_per_beat` ticks.
-    fn compute_loop_end(data: &MidiData) -> f64 {
+    pub fn compute_loop_end(data: &MidiData) -> f64 {
         let last_tick = data
             .tracks
             .iter()
